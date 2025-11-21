@@ -63,11 +63,19 @@ class APIConnectionError(YouTubeAnalyzerError):
 # -----------------------------
 # LOGGING CONFIGURATION
 # -----------------------------
+from logging.handlers import RotatingFileHandler
+
+# Configure logging with rotation to prevent log files from growing too large
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('app.log', encoding='utf-8'),
+        RotatingFileHandler(
+            'app.log',
+            maxBytes=10*1024*1024,  # 10MB max file size
+            backupCount=3,  # Keep 3 backup files
+            encoding='utf-8'
+        ),
         logging.StreamHandler()
     ]
 )
@@ -98,6 +106,8 @@ class Config:
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     rate_limit_seconds: int = 5
     max_audio_file_size_mb: int = 24
+    max_document_upload_mb: int = 50  # Maximum document upload size
+    max_pdf_pages: int = 1000  # Maximum PDF pages to process
     output_dir: Path = Path("outputs")
     max_text_input_length: int = 100000  # Max characters for API calls
     api_timeout_seconds: int = 300  # 5 minutes
@@ -175,6 +185,26 @@ except ValueError as e:
 # -----------------------------
 # UTILITIES
 # -----------------------------
+def sanitize_url_for_log(url: str, max_length: int = 50) -> str:
+    """
+    Sanitize URL for logging to prevent exposing sensitive information.
+    
+    Args:
+        url: URL to sanitize
+        max_length: Maximum length of sanitized URL
+        
+    Returns:
+        Sanitized URL safe for logging
+    """
+    try:
+        # Truncate long URLs to prevent log pollution
+        if len(url) > max_length:
+            return url[:max_length] + "..."
+        return url
+    except:
+        return "[invalid URL]"
+
+
 def safe_filename(s: str) -> str:
     """Convert string to safe filename by removing special characters."""
     return re.sub(r'[^a-zA-Z0-9_\-]+', '_', s)
@@ -195,7 +225,7 @@ def validate_youtube_url(url: str) -> bool:
         valid_domains = ['www.youtube.com', 'youtube.com', 'youtu.be', 'm.youtube.com']
         return parsed.netloc in valid_domains
     except (ValueError, TypeError) as e:
-        logger.warning(f"Failed to parse URL: {url}, error: {e}")
+        logger.warning(f"Failed to parse URL: {sanitize_url_for_log(url)}, error: {e}")
         return False
 
 
@@ -290,7 +320,7 @@ def extract_video_id(url: str) -> str:
         
         return ""
     except (ValueError, IndexError, KeyError) as e:
-        logger.warning(f"Failed to extract video ID from {url}: {e}")
+        logger.warning(f"Failed to extract video ID from {sanitize_url_for_log(url)}: {e}")
         return ""
 
 
@@ -352,7 +382,7 @@ def to_srt(segments: List[Dict[str, Any]]) -> str:
 # -----------------------------
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     """
-    Extract text from a PDF file.
+    Extract text from a PDF file with security limits.
     
     Args:
         file_bytes: PDF file as bytes
@@ -361,14 +391,47 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         Extracted text content
         
     Raises:
-        Exception: If PDF cannot be read or parsed
+        DocumentProcessingError: If PDF exceeds limits or cannot be parsed
     """
-    pdf_file = io.BytesIO(file_bytes)
-    pdf_reader = PyPDF2.PdfReader(pdf_file)
-    text = []
-    for page in pdf_reader.pages:
-        text.append(page.extract_text())
-    return "\n\n".join(text)
+    try:
+        pdf_file = io.BytesIO(file_bytes)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        
+        # Security: Limit number of pages to prevent DoS
+        num_pages = len(pdf_reader.pages)
+        if num_pages > config.max_pdf_pages:
+            raise DocumentProcessingError(
+                f"PDF too large: {num_pages} pages (maximum: {config.max_pdf_pages} pages). "
+                f"Please split the document or process fewer pages."
+            )
+        
+        logger.info(f"Processing PDF with {num_pages} pages")
+        
+        text = []
+        for i, page in enumerate(pdf_reader.pages):
+            try:
+                page_text = page.extract_text()
+                
+                # Security: Limit text per page to prevent memory exhaustion
+                if page_text and len(page_text) > 200000:  # 200K chars per page
+                    logger.warning(f"Page {i+1} text truncated (too large)")
+                    page_text = page_text[:200000]
+                
+                if page_text:
+                    text.append(page_text)
+            except Exception as e:
+                logger.warning(f"Failed to extract text from page {i+1}: {e}")
+                continue
+        
+        if not text:
+            raise DocumentProcessingError("No text could be extracted from PDF")
+        
+        return "\n\n".join(text)
+        
+    except DocumentProcessingError:
+        raise
+    except Exception as e:
+        raise DocumentProcessingError(f"Failed to parse PDF: {str(e)}") from e
 
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
@@ -394,7 +457,7 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
 
 def extract_text_from_txt(file_bytes: bytes) -> str:
     """
-    Extract text from a TXT file.
+    Extract text from a TXT file with automatic encoding detection.
     
     Args:
         file_bytes: TXT file as bytes
@@ -403,9 +466,28 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
         Decoded text content
         
     Raises:
-        UnicodeDecodeError: If file cannot be decoded as UTF-8
+        UnicodeDecodeError: If file cannot be decoded
     """
-    return file_bytes.decode('utf-8')
+    import chardet
+    
+    # Detect encoding for better compatibility
+    detected = chardet.detect(file_bytes)
+    encoding = detected.get('encoding', 'utf-8')
+    confidence = detected.get('confidence', 0)
+    
+    logger.info(f"Detected text encoding: {encoding} (confidence: {confidence:.2%})")
+    
+    try:
+        # Try detected encoding first
+        if encoding and confidence > 0.7:
+            return file_bytes.decode(encoding)
+        else:
+            # Fallback to UTF-8
+            return file_bytes.decode('utf-8')
+    except (UnicodeDecodeError, LookupError):
+        # Last resort: UTF-8 with error replacement
+        logger.warning(f"Encoding detection failed, using UTF-8 with error replacement")
+        return file_bytes.decode('utf-8', errors='replace')
 
 
 def extract_text_from_document(uploaded_file: Any) -> str:
@@ -804,7 +886,7 @@ def process_youtube_video(
             logger.info(f"Progress: {pct}% - {msg_no_emoji}")
     
     try:
-        logger.info(f"Processing YouTube video: {url}")
+        logger.info(f"Processing YouTube video: {sanitize_url_for_log(url)}")
         update_progress(10, "🎬 Starting video processing...")
         
         # Download audio
@@ -919,7 +1001,7 @@ def process_youtube_video(
         }
     
     except Exception as e:
-        logger.error(f"Processing failed for {url}: {e}")
+        logger.error(f"Processing failed for {sanitize_url_for_log(url)}: {e}")
         # Cleanup partial files on failure
         if session_dir.exists():
             try:
@@ -1505,7 +1587,7 @@ if mode == "YouTube Video":
         # Validate YouTube URL
         if not validate_youtube_url(url):
             st.error("❌ Invalid YouTube URL. Please enter a valid YouTube, YouTube Shorts, or youtu.be link.")
-            logger.warning(f"Invalid YouTube URL attempted: {url}")
+            logger.warning(f"Invalid YouTube URL attempted: {sanitize_url_for_log(url)}")
             st.stop()
         
         # Rate limiting
@@ -1621,6 +1703,18 @@ else:  # Document File mode
     if process_doc_button:
         if uploaded_file is None:
             st.error("Please upload a document file.")
+            st.stop()
+        
+        # Validate file size (security: prevent memory exhaustion)
+        file_size_mb = uploaded_file.size / (1024 * 1024)
+        if file_size_mb > config.max_document_upload_mb:
+            st.error(f"❌ **File Too Large**")
+            st.error(f"File size: {file_size_mb:.1f}MB (Maximum: {config.max_document_upload_mb}MB)")
+            st.info("**Suggestions:**\n"
+                   "- Split large documents into smaller files\n"
+                   "- Remove unnecessary images or formatting\n"
+                   "- Convert to plain text format")
+            logger.warning(f"File upload rejected: {file_size_mb:.1f}MB exceeds limit")
             st.stop()
         
         # Rate limiting (shared with video processing)
