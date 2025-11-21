@@ -29,11 +29,20 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('app.log'),
+        logging.FileHandler('app.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Fix Windows console encoding for emoji support
+import sys
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass  # If reconfigure fails, continue without it
 
 # -----------------------------
 # CONFIGURATION
@@ -653,7 +662,13 @@ def process_youtube_video(
         """Helper to update progress if callback is provided."""
         if progress_callback:
             progress_callback(pct, msg)
-        logger.info(f"Progress: {pct}% - {msg}")
+        # Log with emoji fallback for Windows console
+        try:
+            logger.info(f"Progress: {pct}% - {msg}")
+        except UnicodeEncodeError:
+            # Strip emojis for Windows console if needed
+            msg_no_emoji = msg.encode('ascii', 'ignore').decode('ascii')
+            logger.info(f"Progress: {pct}% - {msg_no_emoji}")
     
     try:
         logger.info(f"Processing YouTube video: {url}")
@@ -813,8 +828,14 @@ def process_document(
         """Helper to update progress if callback is provided."""
         if progress_callback:
             progress_callback(pct, msg)
-        logger.info(f"Progress: {pct}% - {msg}")
-    
+        # Log with emoji fallback for Windows console
+        try:
+            logger.info(f"Progress: {pct}% - {msg}")
+        except UnicodeEncodeError:
+            # Strip emojis for Windows console if needed
+            msg_no_emoji = msg.encode('ascii', 'ignore').decode('ascii')
+            logger.info(f"Progress: {pct}% - {msg_no_emoji}")
+
     try:
         logger.info(f"Processing document: {uploaded_file.name}")
         update_progress(10, f"📄 Starting document processing...")
