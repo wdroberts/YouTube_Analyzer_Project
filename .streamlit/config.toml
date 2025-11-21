@@ -1,0 +1,72 @@
+# ============================================================================
+# Streamlit Configuration - YouTube Analyzer
+# ============================================================================
+# This file configures the default theme and server settings
+# Users can still switch themes via the Settings menu (⋮)
+# ============================================================================
+
+[theme]
+# Base theme (light or dark)
+base = "dark"
+
+# Primary color - YouTube red for buttons and accents
+primaryColor = "#FF0000"
+
+# Main background - Dark gray like YouTube's dark mode
+backgroundColor = "#181818"
+
+# Secondary background - Slightly lighter for cards and sidebar
+secondaryBackgroundColor = "#212121"
+
+# Text color - White for good contrast
+textColor = "#FFFFFF"
+
+# Font family
+font = "sans serif"
+
+# ============================================================================
+# Server Configuration
+# ============================================================================
+
+[server]
+# Run in headless mode (no browser auto-open when already running)
+headless = true
+
+# Enable CORS for local development
+enableCORS = false
+
+# Enable XSRF protection
+enableXsrfProtection = true
+
+# Max upload size (50MB to match our document limit)
+maxUploadSize = 50
+
+# ============================================================================
+# Browser Configuration
+# ============================================================================
+
+[browser]
+# Automatically open browser on first run
+gatherUsageStats = false
+
+# ============================================================================
+# UI Configuration
+# ============================================================================
+
+[ui]
+# Hide the hamburger menu (optional - set to false if you want users to access settings)
+hideTopBar = false
+
+# Hide the Streamlit footer "Made with Streamlit"
+hideSidebarNav = false
+
+# ============================================================================
+# Notes
+# ============================================================================
+# - Dark mode is set as default
+# - YouTube red (#FF0000) is used for primary actions
+# - Dark gray backgrounds (#181818, #212121) match YouTube's dark theme
+# - Users can still toggle light/dark in Settings menu
+# - This file is committed to git so all users get dark mode by default
+# ============================================================================
+
