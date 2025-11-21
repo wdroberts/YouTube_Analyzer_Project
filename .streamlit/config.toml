@@ -32,10 +32,7 @@ font = "sans serif"
 # Run in headless mode (no browser auto-open when already running)
 headless = true
 
-# Enable CORS for local development
-enableCORS = false
-
-# Enable XSRF protection
+# Enable XSRF protection (CORS will be auto-enabled for security)
 enableXsrfProtection = true
 
 # Max upload size (50MB to match our document limit)
@@ -53,12 +50,8 @@ gatherUsageStats = false
 # UI Configuration
 # ============================================================================
 
-[ui]
-# Hide the hamburger menu (optional - set to false if you want users to access settings)
-hideTopBar = false
-
-# Hide the Streamlit footer "Made with Streamlit"
-hideSidebarNav = false
+# Note: UI customization options are limited in Streamlit
+# Users can access Settings menu via hamburger icon (top-right)
 
 # ============================================================================
 # Notes
