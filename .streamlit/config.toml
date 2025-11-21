@@ -29,8 +29,8 @@ font = "sans serif"
 # ============================================================================
 
 [server]
-# Run in headless mode (no browser auto-open when already running)
-headless = true
+# Run in headless mode (set to false to auto-open browser)
+headless = false
 
 # Enable XSRF protection (CORS will be auto-enabled for security)
 enableXsrfProtection = true

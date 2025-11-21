@@ -76,34 +76,42 @@ def main():
         except:
             pass
     
-    print("=" * 60)
-    print("YouTube Analyzer Launcher")
+    print("\n" + "=" * 60)
+    print(" YouTube Analyzer - Starting...")
     print("=" * 60)
     print()
     
     # Run checks
-    print("[*] Running startup checks...")
+    print("[1/3] Running startup checks...")
     
     if not check_env_file():
         return 1
-    print("  [OK] Configuration (.env) found")
+    print("      [OK] Configuration (.env) found")
     
     check_virtual_env()
     
     if not check_dependencies():
         return 1
-    print("  [OK] Dependencies OK")
+    print("      [OK] Dependencies OK")
     
-    print("\n[*] Starting application...")
-    print("=" * 60)
-    print()
+    print("\n[2/3] Starting application...")
+    print("      Please wait while the server starts...")
     
     # Launch Streamlit
     try:
+        print("\n[3/3] Opening browser...")
+        print("=" * 60)
+        print("TIP: Keep this window open while using the app.")
+        print("     Press Ctrl+C to stop the application.")
+        print("=" * 60)
+        print()
+        
         subprocess.run([sys.executable, "-m", "streamlit", "run", "app.py.py"])
         return 0
     except KeyboardInterrupt:
         print("\n\n[*] Application stopped by user")
+        print("You can close this window now.")
+        input("\nPress Enter to exit...")
         return 0
     except Exception as e:
         print(f"\n[ERROR] Error launching application: {e}")
