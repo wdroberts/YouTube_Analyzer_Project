@@ -1299,6 +1299,51 @@ st.title("📊 Content Analyzer")
 st.write("Analyze YouTube videos or documents - transcribe, summarize, and extract insights.")
 
 # -----------------------------
+# API KEY CHECK
+# -----------------------------
+if client is None:
+    st.error("⚠️ **OpenAI API Key Not Configured**")
+    
+    with st.expander("📋 **Setup Instructions** - Click to expand", expanded=True):
+        st.markdown("""
+        The application requires an OpenAI API key to function.
+        
+        ### Quick Setup (2 minutes):
+        
+        1. **Get an API key**
+           - Visit: https://platform.openai.com/api-keys
+           - Create an account (if needed)
+           - Generate a new API key
+        
+        2. **Create `.env` file**
+           ```bash
+           # Windows
+           copy env.template .env
+           
+           # Mac/Linux
+           cp env.template .env
+           ```
+        
+        3. **Add your API key to `.env`**
+           ```ini
+           OPENAI_API_KEY=sk-your-actual-key-here
+           ```
+        
+        4. **Restart the application**
+           ```bash
+           streamlit run app.py.py
+           ```
+        
+        ### Need Help?
+        - See `SETUP.md` for detailed instructions
+        - Check `README.md` for troubleshooting
+        - Your `.env` file is protected by `.gitignore` and will never be committed
+        """)
+    
+    st.info("💡 **Note for developers:** Your `.env` file stays local and is never pushed to GitHub!")
+    st.stop()  # Don't show the rest of the UI
+
+# -----------------------------
 # SIDEBAR: PROJECT HISTORY
 # -----------------------------
 with st.sidebar:
