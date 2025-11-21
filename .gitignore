@@ -43,9 +43,12 @@ outputs/
 *.log
 app.log
 
-# Environment variables
+# Environment variables (IMPORTANT: Never commit these!)
 .env
 .env.local
+.env.*.local
+.env.production
+.env.development
 
 # Temporary files
 *.tmp

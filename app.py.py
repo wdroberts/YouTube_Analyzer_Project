@@ -17,6 +17,10 @@ import re
 import PyPDF2
 import docx
 import io
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # -----------------------------
 # LOGGING CONFIGURATION
