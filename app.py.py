@@ -23,6 +23,44 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # -----------------------------
+# CUSTOM EXCEPTIONS
+# -----------------------------
+class YouTubeAnalyzerError(Exception):
+    """Base exception for YouTube Analyzer application."""
+    pass
+
+
+class AudioDownloadError(YouTubeAnalyzerError):
+    """Error downloading audio from video source."""
+    pass
+
+
+class TranscriptionError(YouTubeAnalyzerError):
+    """Error during audio transcription with Whisper API."""
+    pass
+
+
+class APIQuotaError(YouTubeAnalyzerError):
+    """OpenAI API quota or rate limit exceeded."""
+    pass
+
+
+class FileSizeError(YouTubeAnalyzerError):
+    """File size exceeds API limits."""
+    pass
+
+
+class DocumentProcessingError(YouTubeAnalyzerError):
+    """Error processing document file."""
+    pass
+
+
+class APIConnectionError(YouTubeAnalyzerError):
+    """Error connecting to external APIs."""
+    pass
+
+
+# -----------------------------
 # LOGGING CONFIGURATION
 # -----------------------------
 logging.basicConfig(
@@ -381,19 +419,39 @@ def extract_text_from_document(uploaded_file: Any) -> str:
         Extracted text content
         
     Raises:
-        ValueError: If file format is not supported
+        DocumentProcessingError: If file format is not supported or extraction fails
     """
-    file_bytes = uploaded_file.read()
-    file_name = uploaded_file.name.lower()
-    
-    if file_name.endswith('.pdf'):
-        return extract_text_from_pdf(file_bytes)
-    elif file_name.endswith('.docx'):
-        return extract_text_from_docx(file_bytes)
-    elif file_name.endswith('.txt'):
-        return extract_text_from_txt(file_bytes)
-    else:
-        raise ValueError(f"Unsupported file format: {file_name}")
+    try:
+        file_bytes = uploaded_file.read()
+        file_name = uploaded_file.name.lower()
+        
+        if file_name.endswith('.pdf'):
+            text = extract_text_from_pdf(file_bytes)
+        elif file_name.endswith('.docx'):
+            text = extract_text_from_docx(file_bytes)
+        elif file_name.endswith('.txt'):
+            text = extract_text_from_txt(file_bytes)
+        else:
+            raise DocumentProcessingError(
+                f"Unsupported file format: {file_name}. "
+                f"Please use PDF, DOCX, or TXT files."
+            )
+        
+        if not text or not text.strip():
+            raise DocumentProcessingError(
+                "Could not extract any text from the document. "
+                "The file may be empty, corrupted, or contain only images."
+            )
+        
+        return text
+        
+    except DocumentProcessingError:
+        # Re-raise our custom errors
+        raise
+    except Exception as e:
+        raise DocumentProcessingError(
+            f"Failed to extract text from document: {str(e)}"
+        ) from e
 
 
 # -----------------------------
@@ -411,8 +469,8 @@ def download_audio(url: str, session_dir: Path) -> Tuple[Path, Dict[str, Any]]:
         Tuple of (audio_path, video_info_dict)
         
     Raises:
+        AudioDownloadError: If download fails for any reason
         FileNotFoundError: If audio file was not created
-        Exception: If download fails
     """
     # Use a simple filename without extension - yt-dlp will add .mp3
     output_template = str(session_dir / "audio")
@@ -429,14 +487,35 @@ def download_audio(url: str, session_dir: Path) -> Tuple[Path, Dict[str, Any]]:
         'no_warnings': True,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except Exception as e:
+        error_msg = str(e).lower()
+        if 'private' in error_msg or 'unavailable' in error_msg:
+            raise AudioDownloadError(
+                "Video is private, deleted, or unavailable in your region."
+            ) from e
+        elif 'age' in error_msg or 'sign in' in error_msg:
+            raise AudioDownloadError(
+                "Video is age-restricted or requires authentication."
+            ) from e
+        elif 'copyright' in error_msg or 'blocked' in error_msg:
+            raise AudioDownloadError(
+                "Video is blocked due to copyright or regional restrictions."
+            ) from e
+        else:
+            raise AudioDownloadError(
+                f"Could not download video: {str(e)}"
+            ) from e
 
     # The file will be saved as audio.mp3
     audio_path = session_dir / "audio.mp3"
 
     if not audio_path.exists():
-        raise FileNotFoundError(f"Audio file was not created at {audio_path}")
+        raise AudioDownloadError(
+            f"Audio file was not created. Check FFmpeg installation."
+        )
 
     return audio_path, info
 
@@ -456,7 +535,10 @@ def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
         
     Raises:
         ValueError: If client is not initialized
-        Exception: If transcription fails after retries
+        TranscriptionError: If transcription fails
+        FileSizeError: If file is too large
+        APIQuotaError: If API quota exceeded
+        APIConnectionError: If connection to API fails
     """
     if client is None:
         raise ValueError("OpenAI client is not initialized. Check OPENAI_API_KEY.")
@@ -479,12 +561,40 @@ def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
             logger.info("Transcription completed successfully")
             return result
         except Exception as e:
+            error_str = str(e).lower()
+            
+            # Check for specific error types
+            if '413' in str(e) or 'payload too large' in error_str or 'file size' in error_str:
+                raise FileSizeError(
+                    f"Audio file too large for Whisper API (limit: {config.max_audio_file_size_mb}MB). "
+                    f"Try a shorter video or reduce audio quality."
+                ) from e
+            
+            if 'rate_limit' in error_str or 'quota' in error_str or '429' in str(e):
+                raise APIQuotaError(
+                    "OpenAI API rate limit or quota exceeded. "
+                    "Check your usage at https://platform.openai.com/usage"
+                ) from e
+            
+            if 'connection' in error_str or 'timeout' in error_str or 'network' in error_str:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Connection error, retrying... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
+                else:
+                    raise APIConnectionError(
+                        "Could not connect to OpenAI API. Check your internet connection."
+                    ) from e
+            
+            # Generic retry for other errors
             logger.warning(f"Transcription attempt {attempt + 1}/{max_retries} failed: {e}")
             if attempt < max_retries - 1:
                 time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
             else:
                 logger.error(f"Transcription failed after {max_retries} attempts")
-                raise
+                raise TranscriptionError(
+                    f"Transcription failed after {max_retries} attempts: {str(e)}"
+                ) from e
 
 
 # -----------------------------
@@ -492,7 +602,7 @@ def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
 # -----------------------------
 def call_openai_with_retry(messages: List[Dict[str, str]], max_tokens: int, max_retries: int = 3) -> str:
     """
-    Call OpenAI API with retry logic.
+    Call OpenAI API with retry logic and better error handling.
     
     Args:
         messages: List of message dictionaries for chat completion
@@ -504,6 +614,8 @@ def call_openai_with_retry(messages: List[Dict[str, str]], max_tokens: int, max_
         
     Raises:
         ValueError: If client is not initialized
+        APIQuotaError: If API quota exceeded
+        APIConnectionError: If connection fails
         Exception: If API call fails after retries
     """
     if client is None:
@@ -521,6 +633,27 @@ def call_openai_with_retry(messages: List[Dict[str, str]], max_tokens: int, max_
             )
             return response.choices[0].message.content
         except Exception as e:
+            error_str = str(e).lower()
+            
+            # Check for quota/rate limit errors
+            if 'rate_limit' in error_str or 'quota' in error_str or '429' in str(e):
+                raise APIQuotaError(
+                    "OpenAI API rate limit or quota exceeded. "
+                    "Check your usage at https://platform.openai.com/usage"
+                ) from e
+            
+            # Check for connection errors
+            if 'connection' in error_str or 'timeout' in error_str or 'network' in error_str:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Connection error, retrying... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
+                else:
+                    raise APIConnectionError(
+                        "Could not connect to OpenAI API. Check your internet connection."
+                    ) from e
+            
+            # Retry for other errors
             logger.warning(f"OpenAI API call attempt {attempt + 1}/{max_retries} failed: {e}")
             if attempt < max_retries - 1:
                 time.sleep(retry_delay * (attempt + 1))
@@ -820,9 +953,11 @@ def process_document(
             - key_factors: Extracted key factors
             
     Raises:
+        DocumentProcessingError: If document extraction or processing fails
+        APIQuotaError: If API quota exceeded
+        APIConnectionError: If connection to API fails
         ValueError: No text could be extracted or API client not initialized
         IOError: If file writes fail
-        Exception: If processing fails
     """
     def update_progress(pct: int, msg: str):
         """Helper to update progress if callback is provided."""
@@ -846,7 +981,7 @@ def process_document(
         full_text = extract_text_from_document(uploaded_file)
         
         if not full_text.strip():
-            raise ValueError("No text could be extracted from the document.")
+            raise DocumentProcessingError("No text could be extracted from the document.")
         
         logger.info(f"Text extracted: {len(full_text.split())} words, {len(full_text)} characters")
         update_progress(40, f"✅ Extracted: {len(full_text.split())} words")
@@ -1370,9 +1505,64 @@ if mode == "YouTube Video":
             # Render results using UI function
             render_youtube_results(results)
 
+        except AudioDownloadError as e:
+            st.error(f"❌ **Download Failed**")
+            st.error(str(e))
+            st.info("**Suggestions:**\n"
+                   "- Verify the video is public and available\n"
+                   "- Check if the video is available in your region\n"
+                   "- Try a different video URL")
+            logger.error(f"Audio download error: {e}")
+            
+        except FileSizeError as e:
+            st.error(f"❌ **File Too Large**")
+            st.error(str(e))
+            st.info("**Suggestions:**\n"
+                   "- Try a shorter video (under 30 minutes)\n"
+                   "- Lower the audio quality in your .env file (AUDIO_QUALITY=64)\n"
+                   "- The Whisper API has a 25MB file size limit")
+            logger.error(f"File size error: {e}")
+            
+        except TranscriptionError as e:
+            st.error(f"❌ **Transcription Failed**")
+            st.error(str(e))
+            st.info("**Suggestions:**\n"
+                   "- Check that your OpenAI API key is valid\n"
+                   "- Ensure you have API credits available\n"
+                   "- Visit: https://platform.openai.com/usage")
+            logger.error(f"Transcription error: {e}")
+            
+        except APIQuotaError as e:
+            st.error(f"❌ **API Quota Exceeded**")
+            st.error(str(e))
+            st.warning("**What to do:**\n"
+                      "1. Check your OpenAI usage dashboard\n"
+                      "2. Add credits or upgrade your plan\n"
+                      "3. Wait for your rate limit to reset\n"
+                      "4. Visit: https://platform.openai.com/usage")
+            logger.error(f"API quota error: {e}")
+            
+        except APIConnectionError as e:
+            st.error(f"❌ **Connection Failed**")
+            st.error(str(e))
+            st.info("**Suggestions:**\n"
+                   "- Check your internet connection\n"
+                   "- Verify OpenAI services are operational\n"
+                   "- Check: https://status.openai.com/\n"
+                   "- Try again in a few moments")
+            logger.error(f"API connection error: {e}")
+            
         except Exception as e:
-            st.error(f"❌ An error occurred: {str(e)}")
-            st.exception(e)
+            st.error(f"❌ **Unexpected Error**")
+            st.error(str(e))
+            st.info("**Troubleshooting:**\n"
+                   "- Check the app.log file for details\n"
+                   "- Verify all dependencies are installed\n"
+                   "- Ensure FFmpeg is installed and in PATH\n"
+                   "- Try restarting the application")
+            logger.error(f"Unexpected error: {e}")
+            if st.checkbox("Show technical details"):
+                st.exception(e)
 
 else:  # Document File mode
     st.subheader("📄 Document Analysis")
@@ -1430,9 +1620,47 @@ else:  # Document File mode
             # Render results using UI function
             render_document_results(results)
         
+        except DocumentProcessingError as e:
+            st.error(f"❌ **Document Processing Failed**")
+            st.error(str(e))
+            st.info("**Suggestions:**\n"
+                   "- Ensure the document is not corrupted\n"
+                   "- Try converting to a different format (PDF, DOCX, or TXT)\n"
+                   "- Check that the file contains readable text\n"
+                   "- Verify the file is not password-protected")
+            logger.error(f"Document processing error: {e}")
+            
+        except APIQuotaError as e:
+            st.error(f"❌ **API Quota Exceeded**")
+            st.error(str(e))
+            st.warning("**What to do:**\n"
+                      "1. Check your OpenAI usage dashboard\n"
+                      "2. Add credits or upgrade your plan\n"
+                      "3. Wait for your rate limit to reset\n"
+                      "4. Visit: https://platform.openai.com/usage")
+            logger.error(f"API quota error: {e}")
+            
+        except APIConnectionError as e:
+            st.error(f"❌ **Connection Failed**")
+            st.error(str(e))
+            st.info("**Suggestions:**\n"
+                   "- Check your internet connection\n"
+                   "- Verify OpenAI services are operational\n"
+                   "- Check: https://status.openai.com/\n"
+                   "- Try again in a few moments")
+            logger.error(f"API connection error: {e}")
+            
         except Exception as e:
-            st.error(f"❌ An error occurred: {str(e)}")
-            st.exception(e)
+            st.error(f"❌ **Unexpected Error**")
+            st.error(str(e))
+            st.info("**Troubleshooting:**\n"
+                   "- Check the app.log file for details\n"
+                   "- Verify all dependencies are installed (PyPDF2, python-docx)\n"
+                   "- Ensure the document format is supported\n"
+                   "- Try restarting the application")
+            logger.error(f"Unexpected document error: {e}")
+            if st.checkbox("Show technical details", key="doc_details"):
+                st.exception(e)
 
 st.markdown("---")
 st.caption("Built with ❤️ using Python, Streamlit, yt-dlp, and OpenAI Whisper + GPT-4o-mini")
