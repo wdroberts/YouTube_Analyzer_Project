@@ -1,26 +1,45 @@
-## app.py (Corrected Application)
+"""
+YouTube Analyzer - Main Application
+Transcribe and analyze YouTube videos and documents using OpenAI's Whisper and GPT.
+"""
+# Standard library imports
+import io
+import json
+import logging
+import os
+import re
+import shutil
+import sys
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
+from urllib.parse import urlparse, parse_qs
+
+# Third-party imports
+import chardet
+import docx
+import PyPDF2
 import streamlit as st
 import yt_dlp
-import json
-import uuid
-import shutil
-import logging
-import time
-import os
-from datetime import datetime
-from pathlib import Path
-from openai import OpenAI
-from urllib.parse import urlparse, parse_qs
-from typing import Dict, List, Any, Optional, Tuple
-from dataclasses import dataclass
-import re
-import PyPDF2
-import docx
-import io
 from dotenv import load_dotenv
+from openai import OpenAI
 
 # Load environment variables from .env file
 load_dotenv()
+
+# -----------------------------
+# CONSTANTS
+# -----------------------------
+VALID_YOUTUBE_DOMAINS = frozenset([
+    'www.youtube.com',
+    'youtube.com',
+    'youtu.be',
+    'm.youtube.com'
+])
 
 # -----------------------------
 # CUSTOM EXCEPTIONS
@@ -63,7 +82,6 @@ class APIConnectionError(YouTubeAnalyzerError):
 # -----------------------------
 # LOGGING CONFIGURATION
 # -----------------------------
-from logging.handlers import RotatingFileHandler
 
 # Configure logging with rotation to prevent log files from growing too large
 logging.basicConfig(
@@ -82,7 +100,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Fix Windows console encoding for emoji support
-import sys
 if sys.platform == 'win32':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
@@ -108,6 +125,7 @@ class Config:
     max_audio_file_size_mb: int = 24
     max_document_upload_mb: int = 50  # Maximum document upload size
     max_pdf_pages: int = 1000  # Maximum PDF pages to process
+    max_pdf_page_chars: int = 200000  # Maximum characters per PDF page
     output_dir: Path = Path("outputs")
     max_text_input_length: int = 100000  # Max characters for API calls
     api_timeout_seconds: int = 300  # 5 minutes
@@ -222,8 +240,7 @@ def validate_youtube_url(url: str) -> bool:
     """
     try:
         parsed = urlparse(url)
-        valid_domains = ['www.youtube.com', 'youtube.com', 'youtu.be', 'm.youtube.com']
-        return parsed.netloc in valid_domains
+        return parsed.netloc in VALID_YOUTUBE_DOMAINS
     except (ValueError, TypeError) as e:
         logger.warning(f"Failed to parse URL: {sanitize_url_for_log(url)}, error: {e}")
         return False
@@ -413,9 +430,9 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
                 page_text = page.extract_text()
                 
                 # Security: Limit text per page to prevent memory exhaustion
-                if page_text and len(page_text) > 200000:  # 200K chars per page
+                if page_text and len(page_text) > config.max_pdf_page_chars:
                     logger.warning(f"Page {i+1} text truncated (too large)")
-                    page_text = page_text[:200000]
+                    page_text = page_text[:config.max_pdf_page_chars]
                 
                 if page_text:
                     text.append(page_text)
@@ -468,7 +485,6 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
     Raises:
         UnicodeDecodeError: If file cannot be decoded
     """
-    import chardet
     
     # Detect encoding for better compatibility
     detected = chardet.detect(file_bytes)
