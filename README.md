@@ -12,6 +12,7 @@
 
 ### 🎥 YouTube Video Analysis
 - **Automatic Transcription** - High-quality audio transcription using OpenAI Whisper
+- **No Size Limits** - Automatic audio chunking for videos of any length (handles 25MB+ files)
 - **Timestamped Transcripts** - Precise timestamps for every segment
 - **SRT Subtitle Generation** - Export subtitles in industry-standard format
 - **Smart Summaries** - AI-generated 4-6 paragraph summaries
@@ -348,6 +349,7 @@ Built to make video content and documents more accessible and analyzable through
 
 ### Documentation
 - [Setup Guide](env.template) - Configuration reference
+- [Audio Chunking](AUDIO_CHUNKING.md) - How large files are handled
 - [Testing Guide](tests/README.md) - How to run tests
 - [Technical Docs](docs/) - Implementation details
 
@@ -379,6 +381,7 @@ Found a bug or have a suggestion? [Open an issue](https://github.com/wdroberts/Y
 
 ### Completed
 - [x] ✅ YouTube video transcription
+- [x] ✅ Automatic audio chunking for large files
 - [x] ✅ Document analysis
 - [x] ✅ Real-time progress tracking
 - [x] ✅ Project history management

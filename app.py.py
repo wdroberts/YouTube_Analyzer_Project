@@ -27,6 +27,7 @@ import streamlit as st
 import yt_dlp
 from dotenv import load_dotenv
 from openai import OpenAI
+from pydub import AudioSegment
 
 # Load environment variables from .env file
 load_dotenv()
@@ -123,6 +124,8 @@ class Config:
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     rate_limit_seconds: int = 5
     max_audio_file_size_mb: int = 24
+    audio_chunk_size_mb: int = 20  # Target size for audio chunks when splitting
+    audio_chunk_overlap_ms: int = 500  # Overlap between chunks to prevent word cuts
     max_document_upload_mb: int = 50  # Maximum document upload size
     max_pdf_pages: int = 1000  # Maximum PDF pages to process
     max_pdf_page_chars: int = 200000  # Maximum characters per PDF page
@@ -619,11 +622,92 @@ def download_audio(url: str, session_dir: Path) -> Tuple[Path, Dict[str, Any]]:
 
 
 # -----------------------------
+# AUDIO CHUNKING FOR LARGE FILES
+# -----------------------------
+def split_audio_file(audio_path: Path) -> List[Path]:
+    """
+    Split audio file into smaller chunks if it exceeds size limit.
+    
+    Uses pydub to intelligently split large audio files into chunks that meet
+    Whisper API's size requirements, with overlap to prevent mid-word cuts.
+    
+    Args:
+        audio_path: Path to audio file
+        
+    Returns:
+        List of paths to audio chunks (single item if no split needed)
+        
+    Raises:
+        AudioDownloadError: If audio splitting fails
+    """
+    file_size_mb = audio_path.stat().st_size / (1024 * 1024)
+    
+    # If file is small enough, return as-is
+    if file_size_mb <= config.max_audio_file_size_mb:
+        logger.info(f"Audio file size ({file_size_mb:.2f}MB) is within limit - no splitting needed")
+        return [audio_path]
+    
+    logger.info(f"Audio file ({file_size_mb:.2f}MB) exceeds limit ({config.max_audio_file_size_mb}MB). Splitting into chunks...")
+    
+    try:
+        # Load audio file
+        audio = AudioSegment.from_mp3(audio_path)
+        total_duration_ms = len(audio)
+        logger.info(f"Audio duration: {total_duration_ms / 1000:.2f} seconds")
+        
+        # Calculate chunk duration based on target size
+        # Formula: (target_size_MB * 1024 * 1024 * 8) / bitrate_bps * 1000 = duration_ms
+        file_bitrate_bps = (audio_path.stat().st_size * 8) / (total_duration_ms / 1000)
+        chunk_duration_ms = int((config.audio_chunk_size_mb * 1024 * 1024 * 8) / file_bitrate_bps * 1000)
+        
+        logger.info(f"Estimated bitrate: {file_bitrate_bps / 1000:.1f} kbps, chunk duration: {chunk_duration_ms / 1000:.1f}s")
+        
+        chunks = []
+        chunk_dir = audio_path.parent / "chunks"
+        chunk_dir.mkdir(exist_ok=True)
+        
+        # Split audio into chunks with overlap
+        start = 0
+        chunk_num = 0
+        
+        while start < total_duration_ms:
+            end = min(start + chunk_duration_ms, total_duration_ms)
+            
+            # Extract chunk
+            chunk = audio[start:end]
+            chunk_path = chunk_dir / f"chunk_{chunk_num:03d}.mp3"
+            
+            # Export chunk with same quality settings
+            chunk.export(
+                chunk_path,
+                format="mp3",
+                bitrate=f"{config.audio_quality}k"
+            )
+            
+            chunk_size_mb = chunk_path.stat().st_size / (1024 * 1024)
+            chunks.append(chunk_path)
+            
+            logger.info(f"Created chunk {chunk_num + 1}: {chunk_path.name} "
+                       f"({chunk_size_mb:.2f}MB, {(end-start)/1000:.1f}s)")
+            
+            # Move to next chunk with overlap (prevents cutting mid-word)
+            start = end - config.audio_chunk_overlap_ms
+            chunk_num += 1
+        
+        logger.info(f"Successfully split audio into {len(chunks)} chunks")
+        return chunks
+        
+    except Exception as e:
+        logger.error(f"Failed to split audio file: {e}")
+        raise AudioDownloadError(f"Failed to split audio file: {e}") from e
+
+
+# -----------------------------
 # TRANSCRIPTION USING OPENAI
 # -----------------------------
-def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
+def _transcribe_single_file(audio_path: Path) -> Any:
     """
-    Transcribe audio file using OpenAI Whisper API with retry logic.
+    Helper function to transcribe a single audio file using OpenAI Whisper API.
     
     Args:
         audio_path: Path to audio file
@@ -641,7 +725,7 @@ def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
     if client is None:
         raise ValueError("OpenAI client is not initialized. Check OPENAI_API_KEY.")
     
-    logger.info(f"Starting transcription for {audio_path.name}, size: {audio_path.stat().st_size / (1024*1024):.2f} MB")
+    logger.info(f"Transcribing {audio_path.name}, size: {audio_path.stat().st_size / (1024*1024):.2f} MB")
     
     max_retries = 3
     retry_delay = 2  # seconds
@@ -656,7 +740,7 @@ def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
                     timestamp_granularities=["segment"],
                     timeout=config.api_timeout_seconds
                 )
-            logger.info("Transcription completed successfully")
+            logger.info(f"Transcription completed: {audio_path.name}")
             return result
         except Exception as e:
             error_str = str(e).lower()
@@ -693,6 +777,92 @@ def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
                 raise TranscriptionError(
                     f"Transcription failed after {max_retries} attempts: {str(e)}"
                 ) from e
+
+
+def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
+    """
+    Transcribe audio file, automatically splitting if too large for Whisper API.
+    
+    For large audio files, this function splits them into chunks, transcribes each
+    chunk separately, and merges the results with corrected timestamps.
+    
+    Args:
+        audio_path: Path to audio file
+        
+    Returns:
+        Transcription result object with segments and text
+        
+    Raises:
+        ValueError: If client is not initialized
+        TranscriptionError: If transcription fails
+        FileSizeError: If file is too large
+        APIQuotaError: If API quota exceeded
+        APIConnectionError: If connection to API fails
+        AudioDownloadError: If audio splitting fails
+    """
+    if client is None:
+        raise ValueError("OpenAI client is not initialized. Check OPENAI_API_KEY.")
+    
+    # Split audio if needed
+    audio_chunks = split_audio_file(audio_path)
+    
+    if len(audio_chunks) == 1:
+        # Single file - transcribe normally
+        logger.info("Transcribing audio file (no splitting needed)")
+        return _transcribe_single_file(audio_chunks[0])
+    else:
+        # Multiple chunks - transcribe and merge
+        logger.info(f"Transcribing {len(audio_chunks)} audio chunks...")
+        all_segments = []
+        cumulative_time = 0.0
+        full_text_parts = []
+        
+        for i, chunk_path in enumerate(audio_chunks):
+            logger.info(f"Processing chunk {i+1}/{len(audio_chunks)}...")
+            
+            # Transcribe this chunk
+            result = _transcribe_single_file(chunk_path)
+            
+            # Adjust timestamps for this chunk based on cumulative time
+            if hasattr(result, 'segments'):
+                for segment in result.segments:
+                    # Create adjusted segment
+                    adjusted_segment = {
+                        'start': segment['start'] + cumulative_time,
+                        'end': segment['end'] + cumulative_time,
+                        'text': segment['text']
+                    }
+                    all_segments.append(adjusted_segment)
+            
+            # Collect text
+            if hasattr(result, 'text'):
+                full_text_parts.append(result.text)
+            
+            # Update cumulative time for next chunk
+            # Subtract overlap to account for the overlapping section
+            chunk_duration_s = AudioSegment.from_mp3(chunk_path).duration_seconds
+            cumulative_time += chunk_duration_s - (config.audio_chunk_overlap_ms / 1000.0)
+        
+        # Create combined result object
+        class CombinedTranscriptionResult:
+            """Combined transcription result from multiple chunks."""
+            def __init__(self, segments: List[Dict], text: str):
+                self.segments = segments
+                self.text = text
+        
+        combined_text = " ".join(full_text_parts)
+        logger.info(f"Successfully merged {len(audio_chunks)} chunks into single transcript")
+        
+        # Cleanup chunk files
+        chunk_dir = audio_path.parent / "chunks"
+        if chunk_dir.exists():
+            try:
+                shutil.rmtree(chunk_dir)
+                logger.info("Cleaned up temporary audio chunks")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup chunks directory: {e}")
+        
+        return CombinedTranscriptionResult(all_segments, combined_text)
 
 
 # -----------------------------
