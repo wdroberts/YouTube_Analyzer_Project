@@ -1090,15 +1090,10 @@ def process_youtube_video(
         file_size = audio_path.stat().st_size / (1024 * 1024)  # MB
         logger.info(f"Audio file size: {file_size:.2f} MB")
         
-        # Check file size limit for Whisper API
+        # Note: Large files (>24MB) will be automatically split into chunks
+        # by the transcribe_audio_with_timestamps function
         if file_size > config.max_audio_file_size_mb:
-            error_msg = (
-                f"Audio file is too large ({file_size:.2f} MB). "
-                f"OpenAI Whisper API has a {config.max_audio_file_size_mb}MB limit. "
-                f"Please try a shorter video or reduce audio quality in settings."
-            )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
+            logger.info(f"Audio file ({file_size:.2f} MB) exceeds single-file limit. Will use automatic chunking.")
         
         # Transcribe audio
         update_progress(30, "🎤 Transcribing audio with Whisper API...")
