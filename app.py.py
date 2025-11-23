@@ -660,6 +660,17 @@ def split_audio_file(audio_path: Path) -> List[Path]:
         file_bitrate_bps = (audio_path.stat().st_size * 8) / (total_duration_ms / 1000)
         chunk_duration_ms = int((config.audio_chunk_size_mb * 1024 * 1024 * 8) / file_bitrate_bps * 1000)
         
+        # Safety check: ensure chunk duration is reasonable (at least 5 minutes)
+        min_chunk_duration_ms = 300000  # 5 minutes
+        if chunk_duration_ms < min_chunk_duration_ms:
+            logger.warning(f"Calculated chunk duration ({chunk_duration_ms/1000:.1f}s) too small, using minimum ({min_chunk_duration_ms/1000:.1f}s)")
+            chunk_duration_ms = min_chunk_duration_ms
+        
+        # Ensure chunk duration + overlap makes progress
+        if chunk_duration_ms <= config.audio_chunk_overlap_ms:
+            chunk_duration_ms = config.audio_chunk_overlap_ms * 2
+            logger.warning(f"Adjusted chunk duration to {chunk_duration_ms/1000:.1f}s to ensure progress")
+        
         logger.info(f"Estimated bitrate: {file_bitrate_bps / 1000:.1f} kbps, chunk duration: {chunk_duration_ms / 1000:.1f}s")
         
         chunks = []
@@ -669,9 +680,15 @@ def split_audio_file(audio_path: Path) -> List[Path]:
         # Split audio into chunks with overlap
         start = 0
         chunk_num = 0
+        max_chunks = 100  # Safety limit to prevent infinite loops
         
-        while start < total_duration_ms:
+        while start < total_duration_ms and chunk_num < max_chunks:
             end = min(start + chunk_duration_ms, total_duration_ms)
+            
+            # Safety check: ensure we're making progress
+            if end <= start:
+                logger.error(f"Invalid chunk boundaries: start={start}, end={end}")
+                break
             
             # Extract chunk
             chunk = audio[start:end]
@@ -691,8 +708,17 @@ def split_audio_file(audio_path: Path) -> List[Path]:
                        f"({chunk_size_mb:.2f}MB, {(end-start)/1000:.1f}s)")
             
             # Move to next chunk with overlap (prevents cutting mid-word)
-            start = end - config.audio_chunk_overlap_ms
+            # Ensure overlap doesn't cause us to go backwards
+            new_start = end - config.audio_chunk_overlap_ms
+            if new_start <= start:
+                # If overlap would cause us to go backwards, just move forward slightly
+                new_start = start + (chunk_duration_ms // 2)
+            start = new_start
             chunk_num += 1
+        
+        if chunk_num >= max_chunks:
+            logger.error(f"Hit safety limit of {max_chunks} chunks - stopping")
+            raise AudioDownloadError(f"Audio file too complex to split (would need >{max_chunks} chunks)")
         
         logger.info(f"Successfully split audio into {len(chunks)} chunks")
         return chunks
