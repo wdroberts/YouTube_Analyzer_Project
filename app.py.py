@@ -852,12 +852,20 @@ def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
             # Adjust timestamps for this chunk based on cumulative time
             if hasattr(result, 'segments'):
                 for segment in result.segments:
-                    # Create adjusted segment
-                    adjusted_segment = {
-                        'start': segment['start'] + cumulative_time,
-                        'end': segment['end'] + cumulative_time,
-                        'text': segment['text']
-                    }
+                    # Create adjusted segment (handle both dict and object types)
+                    if isinstance(segment, dict):
+                        adjusted_segment = {
+                            'start': segment['start'] + cumulative_time,
+                            'end': segment['end'] + cumulative_time,
+                            'text': segment['text']
+                        }
+                    else:
+                        # segment is an object with attributes
+                        adjusted_segment = {
+                            'start': segment.start + cumulative_time,
+                            'end': segment.end + cumulative_time,
+                            'text': segment.text
+                        }
                     all_segments.append(adjusted_segment)
             
             # Collect text
