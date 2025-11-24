@@ -104,6 +104,7 @@ Access this page by clicking **"Database Explorer"** in the left sidebar navigat
   - Download buttons for all files
   - Tags management
   - Notes (add personal annotations)
+  - **💬 Q&A Chat** (NEW!) - Ask questions about the content
 
 **How to Use**:
 1. Select how many projects per page
@@ -111,6 +112,7 @@ Access this page by clicking **"Database Explorer"** in the left sidebar navigat
 3. Use "Download" buttons to get text files
 4. Add tags to organize projects
 5. Add notes for personal reference
+6. **Click "💬 Start Q&A"** to ask questions about the content (see Q&A section below)
 
 ### Tab 2: 🔍 Advanced Search
 
@@ -210,6 +212,99 @@ Access this page by clicking **"Database Explorer"** in the left sidebar navigat
 2. Click any project card to expand
 3. View details without leaving current page
 4. Click file names to download
+
+---
+
+## 💬 Q&A Feature - Ask Questions About Your Content
+
+### **NEW! Interactive Content Q&A**
+
+Ask questions about any analyzed video or document and get AI-powered answers based on the actual transcript!
+
+### How to Use Q&A:
+
+1. **Navigate to Database Explorer** → Table Viewer
+2. **Click on any project** to expand its details
+3. **Scroll down** to find "💬 Ask Questions About This Content"
+4. **Click "💬 Start Q&A"** button
+5. **Type your question** in the text box
+6. **Click "Ask"** and wait for the AI response
+
+### What You Can Ask:
+
+**Educational Videos:**
+- "What are the main concepts explained?"
+- "Can you summarize the section about X?"
+- "What examples were given for Y?"
+- "What are the key takeaways?"
+
+**Research Papers:**
+- "What is the main hypothesis?"
+- "What methodology was used?"
+- "What were the key findings?"
+- "Were any limitations mentioned?"
+
+**Interviews/Podcasts:**
+- "What did the guest say about [topic]?"
+- "Were any books or resources recommended?"
+- "What was the most controversial point?"
+- "What advice was given about [subject]?"
+
+**Technical Tutorials:**
+- "What code examples were shown?"
+- "How was [concept] explained?"
+- "What tools were mentioned?"
+- "What are the prerequisites?"
+
+### How It Works:
+
+- 🤖 **AI-Powered**: Uses GPT to analyze the full transcript
+- 📝 **Content-Based**: Answers based ONLY on the actual transcript
+- 🎯 **Contextual**: Knows the title and summary for better context
+- 💬 **Multi-Question**: Ask multiple questions in the same session
+- ⚡ **Fast**: Typical response time 5-15 seconds
+
+### Tips for Best Results:
+
+✅ **Be specific**: "What did they say about neural networks?" vs "Tell me about this"  
+✅ **Ask one thing at a time**: Get focused answers  
+✅ **Reference the content**: Use terms/names from the video/document  
+✅ **Follow up**: Ask clarifying questions based on previous answers  
+
+### Example Q&A Session:
+
+```
+You: What are the main topics discussed?
+
+AI: Based on the transcript, the main topics are:
+1. Neural network architecture
+2. Backpropagation algorithm
+3. Gradient descent optimization
+4. Activation functions (ReLU, Sigmoid)
+
+You: Can you explain backpropagation in simple terms?
+
+AI: According to the speaker, backpropagation is the process 
+where the network learns by calculating errors and adjusting 
+weights backward through the layers. They used the analogy 
+of "learning from mistakes" - the network sees where it was 
+wrong and corrects itself...
+```
+
+### Limitations:
+
+- ⚠️ **Content-only**: Can only answer based on what's in the transcript
+- ⚠️ **No external knowledge**: Won't answer questions beyond the content
+- ⚠️ **Text-based**: Can't analyze video/audio directly, only the transcript
+- ⚠️ **Length limits**: Very long transcripts may be truncated (last 15,000 chars kept)
+
+### When to Use Q&A:
+
+- 📚 **Research**: Find specific information without re-reading everything
+- 🎓 **Study**: Test your understanding by asking questions
+- 🔍 **Exploration**: Discover what's covered before diving deep
+- 📝 **Note-taking**: Extract key points for summaries
+- 🤝 **Sharing**: Get quotable answers for team discussions
 
 ---
 

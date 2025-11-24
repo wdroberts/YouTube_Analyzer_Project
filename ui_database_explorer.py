@@ -5,6 +5,7 @@ Provides comprehensive database viewing and management interface.
 import csv
 import io
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -13,6 +14,9 @@ import pandas as pd
 import streamlit as st
 
 from database import DatabaseManager, Project
+
+# Get logger
+logger = logging.getLogger(__name__)
 
 
 def render_database_explorer(db_manager: DatabaseManager, output_dir: Path):
@@ -195,6 +199,85 @@ def render_project_details(db_manager: DatabaseManager, project: Project, output
                 db_manager.remove_tag(project.id, tag_to_remove)
                 st.success(f"Removed tag: {tag_to_remove}")
                 st.rerun()
+    
+    # Q&A Section
+    st.write("---")
+    st.write("**💬 Ask Questions About This Content:**")
+    
+    qa_key = f"qa_mode_{project.id}"
+    if qa_key not in st.session_state:
+        st.session_state[qa_key] = False
+    
+    if not st.session_state[qa_key]:
+        if st.button("💬 Start Q&A", key=f"start_qa_{project.id}", use_container_width=True):
+            st.session_state[qa_key] = True
+            st.rerun()
+    else:
+        # Q&A interface is active
+        question_key = f"question_{project.id}"
+        question = st.text_input(
+            "Your question:",
+            key=question_key,
+            placeholder="e.g., What are the main topics discussed?"
+        )
+        
+        col1, col2 = st.columns([4, 1])
+        
+        with col1:
+            ask_clicked = st.button("🤔 Ask", key=f"ask_{project.id}", type="primary")
+        
+        with col2:
+            if st.button("Close", key=f"close_qa_{project.id}"):
+                st.session_state[qa_key] = False
+                st.session_state.pop(f"answer_{project.id}", None)
+                st.rerun()
+        
+        # Process question
+        if ask_clicked and question and question.strip():
+            with st.spinner("🤔 Thinking..."):
+                try:
+                    # Get the Q&A function - it's defined in the main app file
+                    # When Streamlit runs, it loads app.py.py first, making functions available
+                    import sys
+                    if hasattr(sys.modules.get('__main__'), 'answer_question_from_transcript'):
+                        answer_question_from_transcript = sys.modules['__main__'].answer_question_from_transcript
+                    else:
+                        # Fallback: import directly (for testing)
+                        from importlib.machinery import SourceFileLoader
+                        app_module = SourceFileLoader('app', 'app.py.py').load_module()
+                        answer_question_from_transcript = app_module.answer_question_from_transcript
+                    
+                    # Get project content
+                    content = db_manager.get_project_content(project.id)
+                    transcript = content.get('transcript', '')
+                    summary = content.get('summary', '')
+                    
+                    if not transcript:
+                        st.error("❌ No transcript available for this project.")
+                    else:
+                        # Get answer
+                        answer = answer_question_from_transcript(
+                            question=question,
+                            transcript=transcript,
+                            title=project.title or project.content_title or "Untitled",
+                            summary=summary
+                        )
+                        
+                        # Store answer in session state
+                        st.session_state[f"answer_{project.id}"] = answer
+                        st.rerun()
+                        
+                except Exception as e:
+                    logger.error(f"Q&A error for project {project.id}: {e}")
+                    st.error(f"❌ Error: {str(e)}")
+        
+        # Display stored answer if available
+        if f"answer_{project.id}" in st.session_state:
+            st.write("---")
+            st.write("**Answer:**")
+            st.markdown(st.session_state[f"answer_{project.id}"])
+            st.write("---")
+            st.caption("💡 Tip: Ask another question or click 'Close' to exit Q&A mode.")
     
     # Delete project
     st.write("---")

@@ -495,6 +495,45 @@ class DatabaseManager:
             
             return [(row[0], row[1]) for row in cursor.fetchall()]
     
+    def get_project_content(self, project_id: int) -> Dict[str, str]:
+        """
+        Get project's full content (transcript, summary, key factors).
+        
+        Args:
+            project_id: Project ID
+            
+        Returns:
+            Dict with 'transcript', 'summary', 'key_factors' keys
+            
+        Raises:
+            ProjectNotFoundError: If project doesn't exist
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Verify project exists
+            cursor.execute("SELECT id FROM projects WHERE id = ?", (project_id,))
+            if not cursor.fetchone():
+                raise ProjectNotFoundError(f"Project with ID {project_id} not found")
+            
+            # Get content from FTS table
+            cursor.execute("""
+                SELECT transcript_text, summary_text, key_factors_text
+                FROM project_content_fts
+                WHERE project_id = ?
+            """, (project_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                logger.warning(f"No content found for project {project_id}")
+                return {'transcript': '', 'summary': '', 'key_factors': ''}
+            
+            return {
+                'transcript': row[0] or '',
+                'summary': row[1] or '',
+                'key_factors': row[2] or ''
+            }
+    
     def add_tag(self, project_id: int, tag_name: str):
         """
         Add a tag to a project.
