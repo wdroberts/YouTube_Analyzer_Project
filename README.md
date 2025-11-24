@@ -27,13 +27,25 @@
 - **Key Factor Analysis** - Extract important points and insights
 - **Content Titling** - Automatic descriptive title generation
 
+### 🗄️ Database & Organization
+- **SQLite Database** - Fast, reliable project storage with full-text search
+- **Full-Text Search** - Search within transcripts and summaries using FTS5
+- **Tag System** - Organize projects with custom tags
+- **Notes** - Add personal notes to any project
+- **Statistics Dashboard** - View analytics on your processed content
+- **Export Tools** - Export database as JSON or CSV
+- **D: Drive Storage** - All data stored on configurable location (default: D: drive)
+
 ### 🎯 Advanced Features
-- **Project History** - Organized history of all analyzed content
+- **Database Explorer** - Comprehensive UI for browsing and managing projects
+- **Advanced Search** - Filter by type, tags, date, and content
+- **Project History** - Organized history with quick search
 - **Batch Management** - Easy access to previous projects
 - **Download Options** - Export transcripts, summaries, and metadata
 - **Content-based Titles** - AI-generated titles from transcript content
 - **Error Handling** - Robust retry logic and graceful failure handling
 - **Progress Tracking** - 11-step progress for videos, 9-step for documents
+- **Automatic Migration** - Seamlessly migrate existing projects to new database
 
 ---
 
@@ -120,10 +132,19 @@
 
 ### Managing Projects
 
-- View all processed content in the **Project History** sidebar
-- Click any project to see details (date, word count, type)
+#### Quick Access (Sidebar)
+- View recent projects in the **Project History** sidebar
+- Use quick search to filter projects by title
+- Click any project to see details (date, word count, tags)
 - Delete individual projects or clear all history
-- Update old projects with AI-generated titles
+
+#### Database Explorer
+- Navigate to **Database Explorer** page for advanced management
+- **Table Viewer**: Browse all projects with sorting and pagination
+- **Advanced Search**: Search by metadata (type, tags, date) or full-text content
+- **Tags & Notes**: Add custom tags and notes to organize projects
+- **Statistics Dashboard**: View analytics (total projects, words, top tags, timeline)
+- **Export**: Export database as JSON or CSV, create backups
 
 ---
 
@@ -153,6 +174,7 @@ OPENAI_API_KEY=sk-your-key-here
 # Recommended
 AUDIO_QUALITY=96              # 32-320 kbps (96 recommended)
 OPENAI_MODEL=gpt-4o-mini      # Model for summaries
+DATA_ROOT=D:\Documents\Software_Projects\YouTube_Analyzer_Project\Data  # Storage location
 ```
 
 ### Advanced Settings
@@ -162,6 +184,37 @@ MAX_AUDIO_FILE_SIZE_MB=24     # Whisper API limit
 RATE_LIMIT_SECONDS=5          # Cooldown between requests
 LOG_LEVEL=INFO                # Logging verbosity
 ```
+
+### Data Storage
+
+By default, all output files and the database are stored at:
+```
+D:\Documents\Software_Projects\YouTube_Analyzer_Project\Data\
+├── youtube_analyzer.db       # SQLite database
+└── outputs\                  # Project output files
+    ├── <video_id>\
+    │   ├── audio.mp3
+    │   ├── transcript.txt
+    │   ├── transcript_with_timestamps.txt
+    │   ├── transcript.srt
+    │   ├── summary.txt
+    │   ├── key_factors.txt
+    │   └── metadata.json
+    └── ...
+```
+
+You can customize the storage location by setting `DATA_ROOT` in your `.env` file.
+
+### First-Time Migration
+
+When you first run the updated application with existing projects:
+1. The app will detect old projects in the `./outputs` folder
+2. Automatic migration will start, showing progress
+3. Projects are copied to the new D: drive location
+4. All projects are imported into the SQLite database
+5. Old files are backed up to `./backups` folder for safety
+
+The migration is non-destructive and creates backups automatically.
 
 See [env.template](env.template) for complete configuration reference.
 
@@ -188,28 +241,54 @@ See [env.template](env.template) for complete configuration reference.
 ### Key Technologies
 
 - **Frontend**: Streamlit (Python web framework)
-- **Transcription**: OpenAI Whisper API
+- **Database**: SQLite with FTS5 (Full-Text Search)
+- **Transcription**: OpenAI Whisper API + faster-whisper (local GPU)
 - **Summarization**: GPT-4o-mini (or GPT-4)
 - **Video Download**: yt-dlp
 - **Document Parsing**: PyPDF2, python-docx
+- **Data Visualization**: Pandas for analytics
 - **Testing**: pytest with 65 automated tests
 - **CI/CD**: GitHub Actions
 
 ### Processing Pipeline
 
-#### YouTube Videos (6 Steps)
+#### YouTube Videos (7 Steps)
 1. 🎬 Validate URL and create session
 2. ⬇️ Download audio (MP3 format)
-3. 🎤 Transcribe with Whisper API
+3. 🎤 Transcribe with Whisper (API or Local GPU)
 4. 💾 Save transcripts (TXT, SRT, timestamped)
 5. 📝 Generate AI summary
 6. 🎯 Extract key factors and create title
+7. 🗄️ Save to database with full-text indexing
 
-#### Documents (4 Steps)
+#### Documents (5 Steps)
 1. 📄 Extract text from file
 2. 📝 Generate AI summary  
 3. 🎯 Extract key factors
 4. 📋 Create descriptive title
+5. 🗄️ Save to database with full-text indexing
+
+### Database Schema
+
+The application uses SQLite with the following structure:
+
+```sql
+projects (id, type, title, content_title, source, created_at, 
+          word_count, segment_count, project_dir, notes)
+          
+tags (id, name)
+
+project_tags (project_id, tag_id)  -- Many-to-many relationship
+
+project_content_fts (FTS5 virtual table for full-text search)
+  - project_id, transcript_text, summary_text, key_factors_text
+```
+
+**Features:**
+- Full-text search across all content using SQLite FTS5
+- Tag-based organization with many-to-many relationships
+- Indexed queries for fast filtering and sorting
+- Automatic backup and export functionality
 
 ---
 

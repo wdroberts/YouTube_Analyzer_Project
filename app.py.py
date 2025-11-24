@@ -130,7 +130,10 @@ class Config:
     max_document_upload_mb: int = 50  # Maximum document upload size
     max_pdf_pages: int = 1000  # Maximum PDF pages to process
     max_pdf_page_chars: int = 200000  # Maximum characters per PDF page
-    output_dir: Path = Path("outputs")
+    # Data storage paths
+    data_root: Path = Path(os.getenv("DATA_ROOT", r"D:\Documents\Software_Projects\YouTube_Analyzer_Project\Data"))
+    output_dir: Path = None  # Will be set in __post_init__
+    database_path: Path = None  # Will be set in __post_init__
     max_text_input_length: int = 100000  # Max characters for API calls
     api_timeout_seconds: int = 300  # 5 minutes
     
@@ -140,11 +143,27 @@ class Config:
             raise ValueError(f"Invalid audio quality: {self.audio_quality}. Must be between 32-320 kbps")
         if self.max_audio_file_size_mb > 25:
             raise ValueError(f"Max file size cannot exceed 25MB (Whisper API limit)")
+        
+        # Set up paths based on data_root
+        if self.output_dir is None:
+            self.output_dir = self.data_root / "outputs"
+        if self.database_path is None:
+            self.database_path = self.data_root / "youtube_analyzer.db"
+        
+        # Create directories
+        self.data_root.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(exist_ok=True)
+        
         logger.info(f"Configuration initialized: audio_quality={self.audio_quality}, model={self.openai_model}")
+        logger.info(f"Data root: {self.data_root}")
+        logger.info(f"Database: {self.database_path}")
 
 # Initialize configuration
 config = Config()
+
+# Initialize database
+from database import DatabaseManager
+db_manager = DatabaseManager(config.database_path)
 
 # Prompt templates
 PROMPTS = {
@@ -1322,6 +1341,28 @@ def process_youtube_video(
         if not safe_write_text(session_dir / "metadata.json", json.dumps(metadata, indent=4)):
             raise IOError("Failed to save metadata file")
         
+        # Save to database
+        update_progress(97, "💾 Saving to database...")
+        try:
+            from database import Project
+            project = Project(
+                type='youtube',
+                title=video_title,
+                content_title=transcript_title,
+                source=url,
+                created_at=metadata['timestamp'],
+                word_count=metadata['word_count'],
+                segment_count=metadata['segment_count'],
+                project_dir=session_dir.name,
+                notes='',
+                tags=[]
+            )
+            db_manager.insert_project(project, transcript=full_text, summary=summary, key_factors=key_factors)
+            logger.info("Project saved to database")
+        except Exception as e:
+            logger.warning(f"Failed to save to database: {e}")
+            # Don't fail the whole process if database save fails
+        
         update_progress(100, "✅ Processing complete!")
         logger.info(f"✅ Processing completed successfully for: {video_title}")
         
@@ -1444,6 +1485,28 @@ def process_document(
         
         if not safe_write_text(session_dir / "metadata.json", json.dumps(metadata, indent=4)):
             raise IOError("Failed to save metadata file")
+        
+        # Save to database
+        update_progress(97, "💾 Saving to database...")
+        try:
+            from database import Project
+            project = Project(
+                type='document',
+                title=uploaded_file.name,
+                content_title=content_title,
+                source=uploaded_file.name,
+                created_at=metadata['timestamp'],
+                word_count=metadata['word_count'],
+                segment_count=0,
+                project_dir=session_dir.name,
+                notes='',
+                tags=[]
+            )
+            db_manager.insert_project(project, transcript=full_text, summary=summary, key_factors=key_factors)
+            logger.info("Project saved to database")
+        except Exception as e:
+            logger.warning(f"Failed to save to database: {e}")
+            # Don't fail the whole process if database save fails
         
         update_progress(100, "✅ Processing complete!")
         logger.info(f"✅ Processing completed successfully for: {uploaded_file.name}")
@@ -1762,12 +1825,99 @@ if client is None:
     st.stop()  # Don't show the rest of the UI
 
 # -----------------------------
-# SIDEBAR: PROJECT HISTORY
+# MIGRATION CHECK
+# -----------------------------
+# Check if migration is needed on first run
+old_outputs_dir = Path("outputs")
+if old_outputs_dir.exists() and old_outputs_dir != config.output_dir:
+    from migration import perform_migration_check_and_migrate
+    
+    if 'migration_completed' not in st.session_state:
+        st.info("🔄 **First-time setup detected!** Migrating existing projects to new database and D: drive...")
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        def migration_progress(current, total, message):
+            progress = int((current / total) * 100)
+            progress_bar.progress(progress)
+            status_text.text(message)
+        
+        try:
+            migrated, message = perform_migration_check_and_migrate(
+                db_manager,
+                old_outputs_dir,
+                config.output_dir,
+                progress_callback=migration_progress
+            )
+            
+            if migrated:
+                st.success(f"✅ {message}")
+                st.info(f"📁 Your data is now stored at: {config.data_root}")
+                st.session_state.migration_completed = True
+                st.rerun()
+            else:
+                st.session_state.migration_completed = True
+        except Exception as e:
+            st.error(f"❌ Migration failed: {e}")
+            st.warning("You may need to manually check your data directories.")
+            logger.error(f"Migration error: {e}")
+
+# -----------------------------
+# PAGE NAVIGATION
+# -----------------------------
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = "Process"
+
+# -----------------------------
+# SIDEBAR: NAVIGATION & PROJECT HISTORY
 # -----------------------------
 with st.sidebar:
+    st.header("🧭 Navigation")
+    
+    page = st.radio(
+        "Select Page",
+        options=["Process", "Database Explorer"],
+        index=0 if st.session_state.current_page == "Process" else 1,
+        label_visibility="collapsed"
+    )
+    
+    if page != st.session_state.current_page:
+        st.session_state.current_page = page
+        st.rerun()
+    
+    st.markdown("---")
     st.header("📁 Project History")
     
-    projects = list_projects()
+    # Quick search in sidebar
+    search_query = st.text_input("🔍 Quick search", placeholder="Search projects...", key="sidebar_search")
+    
+    # Get projects from database
+    try:
+        if search_query:
+            db_projects = db_manager.list_projects(search_query=search_query, limit=20)
+        else:
+            db_projects = db_manager.list_projects(limit=20, order_by="created_at", order_desc=True)
+        
+        # Convert to dict format for compatibility
+        projects = []
+        for p in db_projects:
+            proj_dict = {
+                'project_dir': p.project_dir,
+                'title': p.title,
+                'transcript_title': p.content_title if p.type == 'youtube' else None,
+                'content_title': p.content_title if p.type == 'document' else None,
+                'url': p.source if p.type == 'youtube' else None,
+                'filename': p.source if p.type == 'document' else None,
+                'timestamp': p.created_at,
+                'word_count': p.word_count,
+                'tags': p.tags
+            }
+            projects.append(proj_dict)
+    except Exception as e:
+        logger.error(f"Failed to load projects from database: {e}")
+        # Fallback to file-based loading
+        projects = list_projects()
     
     if projects:
         st.write(f"**Total projects:** {len(projects)}")
@@ -1905,6 +2055,16 @@ with st.sidebar:
     else:
         st.info("No projects yet.\n\nProcess a video or document to get started!")
 
+# -----------------------------
+# PAGE ROUTING
+# -----------------------------
+if st.session_state.current_page == "Database Explorer":
+    # Show database explorer UI
+    from ui_database_explorer import render_database_explorer
+    render_database_explorer(db_manager, config.output_dir)
+    st.stop()
+
+# Otherwise, show the main processing interface
 # Mode selector
 mode = st.radio("Select input type:", ["YouTube Video", "Document File"], horizontal=True)
 
