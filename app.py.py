@@ -1899,6 +1899,10 @@ with st.sidebar:
         st.session_state.current_page = page
         st.rerun()
     
+    # Help button
+    if st.button("❓ Help & User Guide", use_container_width=True, help="View complete user guide"):
+        st.session_state.show_help = True
+    
     st.markdown("---")
     st.header("📁 Project History")
     
@@ -2073,6 +2077,42 @@ with st.sidebar:
                 st.rerun()
     else:
         st.info("No projects yet.\n\nProcess a video or document to get started!")
+
+# -----------------------------
+# HELP MODAL
+# -----------------------------
+if 'show_help' not in st.session_state:
+    st.session_state.show_help = False
+
+if st.session_state.show_help:
+    # Display help guide in a modal-like container
+    with st.container():
+        st.markdown("---")
+        col1, col2, col3 = st.columns([1, 8, 1])
+        with col3:
+            if st.button("✖ Close", key="close_help"):
+                st.session_state.show_help = False
+                st.rerun()
+        
+        with col2:
+            # Read and display the user guide
+            try:
+                user_guide_path = Path(__file__).parent / "USER_GUIDE.md"
+                if user_guide_path.exists():
+                    with open(user_guide_path, 'r', encoding='utf-8') as f:
+                        user_guide_content = f.read()
+                    st.markdown(user_guide_content)
+                else:
+                    st.error("User guide file not found. Please check USER_GUIDE.md exists.")
+            except Exception as e:
+                st.error(f"Error loading user guide: {e}")
+        
+        st.markdown("---")
+        if st.button("✖ Close Help", key="close_help_bottom", use_container_width=True):
+            st.session_state.show_help = False
+            st.rerun()
+    
+    st.stop()  # Don't show main content when help is displayed
 
 # -----------------------------
 # PAGE ROUTING
