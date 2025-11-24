@@ -314,10 +314,17 @@ def safe_write_text(path: Path, content: str, encoding: str = "utf-8") -> bool:
         return False
 
 
+# Q&A functionality moved to qa_service.py for better modularity
+# Import it here for backward compatibility
+from qa_service import answer_question_from_transcript as _qa_function
+
 def answer_question_from_transcript(question: str, transcript: str, title: str, 
                                     summary: str = "") -> str:
     """
     Answer questions about transcript content using GPT.
+    
+    This is a wrapper function that calls the qa_service module.
+    The actual implementation is in qa_service.py for better modularity.
     
     Args:
         question: User's question about the content
@@ -331,61 +338,14 @@ def answer_question_from_transcript(question: str, transcript: str, title: str,
     Raises:
         ValueError: If OpenAI client not initialized
     """
-    if client is None:
-        raise ValueError("OpenAI client not initialized. Please configure API key.")
-    
-    try:
-        # Build context for the AI
-        context = f"Content Title: {title}\n\n"
-        
-        if summary:
-            context += f"Summary:\n{summary}\n\n"
-        
-        context += f"Full Transcript:\n{transcript}"
-        
-        # Limit context length to avoid token limits (keep last 15000 chars if too long)
-        max_context_length = 15000
-        if len(context) > max_context_length:
-            logger.info(f"Transcript too long ({len(context)} chars), truncating to {max_context_length}")
-            # Keep the summary but truncate transcript
-            if summary:
-                available_for_transcript = max_context_length - len(f"Content Title: {title}\n\nSummary:\n{summary}\n\nFull Transcript:\n")
-                context = f"Content Title: {title}\n\nSummary:\n{summary}\n\nFull Transcript:\n{transcript[-available_for_transcript:]}"
-            else:
-                context = f"Content Title: {title}\n\nFull Transcript:\n{transcript[-max_context_length:]}"
-        
-        logger.info(f"Answering Q&A question about '{title}': {question[:100]}...")
-        
-        response = client.chat.completions.create(
-            model=config.openai_model,
-            messages=[
-                {
-                    "role": "system", 
-                    "content": (
-                        f"You are an AI assistant helping analyze content titled: '{title}'. "
-                        "Answer questions based ONLY on the provided transcript and summary. "
-                        "Be specific and cite relevant parts when possible. "
-                        "If the information isn't in the provided content, clearly say so. "
-                        "Keep answers concise but informative (2-4 paragraphs typically)."
-                    )
-                },
-                {
-                    "role": "user", 
-                    "content": f"{context}\n\nQuestion: {question}"
-                }
-            ],
-            temperature=0.7,
-            max_tokens=800
-        )
-        
-        answer = response.choices[0].message.content
-        logger.info(f"Q&A answer generated successfully ({len(answer)} chars)")
-        return answer
-        
-    except Exception as e:
-        error_msg = f"Error generating answer: {str(e)}"
-        logger.error(error_msg)
-        return f"❌ {error_msg}\n\nPlease try again or rephrase your question."
+    return _qa_function(
+        question=question,
+        transcript=transcript,
+        title=title,
+        summary=summary,
+        client=client,
+        model=config.openai_model
+    )
 
 
 def truncate_title(title: str, max_length: Optional[int] = None) -> str:

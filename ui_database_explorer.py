@@ -236,16 +236,18 @@ def render_project_details(db_manager: DatabaseManager, project: Project, output
         if ask_clicked and question and question.strip():
             with st.spinner("🤔 Thinking..."):
                 try:
-                    # Get the Q&A function - it's defined in the main app file
-                    # When Streamlit runs, it loads app.py.py first, making functions available
+                    # Import Q&A service - now from dedicated module
+                    from qa_service import answer_question_from_transcript
+                    
+                    # Get OpenAI client from main module
                     import sys
-                    if hasattr(sys.modules.get('__main__'), 'answer_question_from_transcript'):
-                        answer_question_from_transcript = sys.modules['__main__'].answer_question_from_transcript
+                    main_module = sys.modules.get('__main__')
+                    if main_module and hasattr(main_module, 'client'):
+                        openai_client = main_module.client
+                        openai_model = getattr(main_module.config, 'openai_model', 'gpt-4o-mini')
                     else:
-                        # Fallback: import directly (for testing)
-                        from importlib.machinery import SourceFileLoader
-                        app_module = SourceFileLoader('app', 'app.py.py').load_module()
-                        answer_question_from_transcript = app_module.answer_question_from_transcript
+                        st.error("❌ OpenAI client not available. Please restart the app.")
+                        return
                     
                     # Get project content
                     content = db_manager.get_project_content(project.id)
@@ -255,12 +257,14 @@ def render_project_details(db_manager: DatabaseManager, project: Project, output
                     if not transcript:
                         st.error("❌ No transcript available for this project.")
                     else:
-                        # Get answer
+                        # Get answer from Q&A service
                         answer = answer_question_from_transcript(
                             question=question,
                             transcript=transcript,
                             title=project.title or project.content_title or "Untitled",
-                            summary=summary
+                            summary=summary,
+                            client=openai_client,
+                            model=openai_model
                         )
                         
                         # Store answer in session state
