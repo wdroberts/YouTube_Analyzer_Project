@@ -137,6 +137,13 @@ class Config:
     max_text_input_length: int = 100000  # Max characters for API calls
     api_timeout_seconds: int = 300  # 5 minutes
     
+    # Q&A Service Configuration
+    qa_temperature: float = float(os.getenv("QA_TEMPERATURE", "0.7"))  # Creativity (0.0-2.0)
+    qa_max_tokens: int = int(os.getenv("QA_MAX_TOKENS", "800"))  # Max response length
+    qa_max_context_chars: int = int(os.getenv("QA_MAX_CONTEXT_CHARS", "15000"))  # Max context length
+    qa_min_question_length: int = 5  # Minimum question length
+    qa_max_question_length: int = 500  # Maximum question length
+    
     def __post_init__(self):
         """Validate configuration after initialization."""
         if self.audio_quality < 32 or self.audio_quality > 320:

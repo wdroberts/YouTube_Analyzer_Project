@@ -230,58 +230,91 @@ def render_project_details(db_manager: DatabaseManager, project: Project, output
             if st.button("Close", key=f"close_qa_{project.id}"):
                 st.session_state[qa_key] = False
                 st.session_state.pop(f"answer_{project.id}", None)
+                # Keep history when closing
                 st.rerun()
         
         # Process question
-        if ask_clicked and question and question.strip():
-            with st.spinner("🤔 Thinking..."):
-                try:
-                    # Import Q&A service - now from dedicated module
-                    from qa_service import answer_question_from_transcript
-                    
-                    # Get OpenAI client from main module
-                    import sys
-                    main_module = sys.modules.get('__main__')
-                    if main_module and hasattr(main_module, 'client'):
-                        openai_client = main_module.client
-                        openai_model = getattr(main_module.config, 'openai_model', 'gpt-4o-mini')
-                    else:
-                        st.error("❌ OpenAI client not available. Please restart the app.")
-                        return
-                    
-                    # Get project content
-                    content = db_manager.get_project_content(project.id)
-                    transcript = content.get('transcript', '')
-                    summary = content.get('summary', '')
-                    
-                    if not transcript:
-                        st.error("❌ No transcript available for this project.")
-                    else:
-                        # Get answer from Q&A service
-                        answer = answer_question_from_transcript(
-                            question=question,
-                            transcript=transcript,
-                            title=project.title or project.content_title or "Untitled",
-                            summary=summary,
-                            client=openai_client,
-                            model=openai_model
-                        )
+        if ask_clicked:
+            # Enhanced input validation
+            if not question or not question.strip():
+                st.warning("⚠️ Please enter a question.")
+            elif len(question.strip()) < 5:
+                st.warning("⚠️ Question too short. Please be more specific (minimum 5 characters).")
+            elif len(question) > 500:
+                st.warning("⚠️ Question too long. Please keep it under 500 characters.")
+            else:
+                with st.spinner("🤔 Thinking..."):
+                    try:
+                        # Import Q&A service - now from dedicated module
+                        from qa_service import answer_question_from_transcript
                         
-                        # Store answer in session state
-                        st.session_state[f"answer_{project.id}"] = answer
-                        st.rerun()
+                        # Get OpenAI client and config from main module
+                        import sys
+                        main_module = sys.modules.get('__main__')
+                        if main_module and hasattr(main_module, 'client'):
+                            openai_client = main_module.client
+                            config = main_module.config
+                        else:
+                            st.error("❌ OpenAI client not available. Please restart the app.")
+                            return
                         
-                except Exception as e:
-                    logger.error(f"Q&A error for project {project.id}: {e}")
-                    st.error(f"❌ Error: {str(e)}")
+                        # Get project content
+                        content = db_manager.get_project_content(project.id)
+                        transcript = content.get('transcript', '')
+                        summary = content.get('summary', '')
+                        
+                        if not transcript:
+                            st.error("❌ No transcript available for this project.")
+                        else:
+                            # Get answer from Q&A service (with configurable parameters)
+                            answer = answer_question_from_transcript(
+                                question=question,
+                                transcript=transcript,
+                                title=project.title or project.content_title or "Untitled",
+                                summary=summary,
+                                client=openai_client,
+                                model=config.openai_model,
+                                temperature=config.qa_temperature,
+                                max_tokens=config.qa_max_tokens,
+                                max_context_length=config.qa_max_context_chars
+                            )
+                            
+                            # Initialize conversation history if needed
+                            history_key = f"qa_history_{project.id}"
+                            if history_key not in st.session_state:
+                                st.session_state[history_key] = []
+                            
+                            # Add to conversation history
+                            st.session_state[history_key].append({
+                                'question': question,
+                                'answer': answer,
+                                'timestamp': datetime.now().isoformat()
+                            })
+                            
+                            # Also store in old key for compatibility
+                            st.session_state[f"answer_{project.id}"] = answer
+                            st.rerun()
+                            
+                    except Exception as e:
+                        logger.error(f"Q&A error for project {project.id}: {e}")
+                        st.error(f"❌ Error: {str(e)}")
         
-        # Display stored answer if available
-        if f"answer_{project.id}" in st.session_state:
+        # Display conversation history
+        history_key = f"qa_history_{project.id}"
+        if history_key in st.session_state and st.session_state[history_key]:
             st.write("---")
-            st.write("**Answer:**")
-            st.markdown(st.session_state[f"answer_{project.id}"])
-            st.write("---")
-            st.caption("💡 Tip: Ask another question or click 'Close' to exit Q&A mode.")
+            st.write("**Conversation History:**")
+            
+            for i, qa in enumerate(st.session_state[history_key], 1):
+                st.write(f"**Q{i}:** {qa['question']}")
+                st.markdown(qa['answer'])
+                
+                # Show timestamp for older questions
+                if i < len(st.session_state[history_key]):
+                    st.caption(f"Asked at: {qa['timestamp'][:19].replace('T', ' ')}")
+                st.write("---")
+            
+            st.caption(f"💡 Tip: Asked {len(st.session_state[history_key])} question(s). Ask another or click 'Close' to exit.")
     
     # Delete project
     st.write("---")

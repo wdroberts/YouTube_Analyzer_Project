@@ -2,9 +2,10 @@
 YouTube Analyzer - Q&A Service Module
 Provides AI-powered question answering for analyzed content.
 """
+import hashlib
 import logging
 import time
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 from openai import OpenAI
 
@@ -13,6 +14,11 @@ logger = logging.getLogger(__name__)
 # Rate limiting state
 _last_qa_call_time = 0.0
 _min_call_interval = 1.0  # Minimum seconds between API calls
+
+# Response cache: {cache_key: (answer, timestamp, token_count)}
+_response_cache: Dict[str, Tuple[str, float, int]] = {}
+_cache_max_age = 3600  # Cache responses for 1 hour
+_cache_max_size = 100  # Store up to 100 cached responses
 
 
 def answer_question_from_transcript(
@@ -63,6 +69,19 @@ def answer_question_from_transcript(
         raise ValueError(
             "OpenAI client not initialized. Please provide a valid OpenAI client instance."
         )
+    
+    # Check cache first
+    cache_key = get_cache_key(question, transcript)
+    clear_old_cache_entries()  # Clean up old entries
+    
+    if cache_key in _response_cache:
+        cached_answer, cached_time, cached_tokens = _response_cache[cache_key]
+        age_seconds = time.time() - cached_time
+        logger.info(
+            f"Cache HIT for question (age: {age_seconds:.0f}s, "
+            f"tokens saved: {cached_tokens})"
+        )
+        return cached_answer
     
     # Rate limiting: Ensure minimum time between API calls
     global _last_qa_call_time
@@ -152,12 +171,18 @@ def answer_question_from_transcript(
         answer = response.choices[0].message.content
         
         # Log usage for monitoring
+        total_tokens = 0
         if hasattr(response, 'usage') and response.usage:
+            total_tokens = response.usage.total_tokens
             logger.info(
                 f"Q&A API usage - Prompt: {response.usage.prompt_tokens}, "
                 f"Completion: {response.usage.completion_tokens}, "
-                f"Total: {response.usage.total_tokens} tokens"
+                f"Total: {total_tokens} tokens"
             )
+        
+        # Cache the response
+        _response_cache[cache_key] = (answer, time.time(), total_tokens)
+        logger.info(f"Cached response (key: {cache_key}, cache size: {len(_response_cache)})")
         
         logger.info(f"Q&A answer generated successfully ({len(answer)} chars)")
         return answer
@@ -182,4 +207,58 @@ def estimate_tokens(text: str) -> int:
         Estimated number of tokens
     """
     return len(text) // 4
+
+
+def get_cache_key(question: str, transcript: str) -> str:
+    """
+    Generate cache key from question and transcript.
+    
+    Uses MD5 hash of normalized question and first 1000 chars of transcript
+    to create a unique but compact cache key.
+    
+    Args:
+        question: User's question (normalized: lowercased, stripped)
+        transcript: Full transcript (only first 1000 chars used for hashing)
+        
+    Returns:
+        Cache key string (16 character hex)
+    """
+    # Normalize question
+    q_normalized = question.lower().strip()
+    
+    # Use first 1000 chars of transcript for cache key
+    # (assumes questions are about general content, not specific timestamps)
+    t_sample = transcript[:1000]
+    
+    # Create combined hash
+    combined = f"{q_normalized}|{t_sample}"
+    hash_obj = hashlib.md5(combined.encode('utf-8'))
+    return hash_obj.hexdigest()[:16]
+
+
+def clear_old_cache_entries():
+    """Clear expired cache entries to prevent memory bloat."""
+    global _response_cache
+    current_time = time.time()
+    
+    # Remove expired entries
+    expired_keys = [
+        key for key, (_, timestamp, _) in _response_cache.items()
+        if current_time - timestamp > _cache_max_age
+    ]
+    
+    for key in expired_keys:
+        del _response_cache[key]
+    
+    # If still over size limit, remove oldest entries
+    if len(_response_cache) > _cache_max_size:
+        sorted_items = sorted(
+            _response_cache.items(),
+            key=lambda x: x[1][1]  # Sort by timestamp
+        )
+        # Keep only the newest entries
+        _response_cache = dict(sorted_items[-_cache_max_size:])
+    
+    if expired_keys:
+        logger.info(f"Cleared {len(expired_keys)} expired cache entries")
 
