@@ -11,7 +11,8 @@
 ## ✨ Features
 
 ### 🎥 YouTube Video Analysis
-- **Automatic Transcription** - High-quality audio transcription using OpenAI Whisper
+- **Hybrid Transcription** - Choose between Local GPU (2x faster, FREE) or OpenAI API (best quality)
+- **Local GPU Support** - Leverage your NVIDIA GPU for fast, free transcription
 - **No Size Limits** - Automatic audio chunking for videos of any length (handles 25MB+ files)
 - **Timestamped Transcripts** - Precise timestamps for every segment
 - **SRT Subtitle Generation** - Export subtitles in industry-standard format
@@ -349,6 +350,7 @@ Built to make video content and documents more accessible and analyzable through
 
 ### Documentation
 - [Setup Guide](env.template) - Configuration reference
+- [Hybrid Transcription](HYBRID_TRANSCRIPTION.md) - Local GPU vs OpenAI API guide
 - [Audio Chunking](AUDIO_CHUNKING.md) - How large files are handled
 - [Testing Guide](tests/README.md) - How to run tests
 - [Technical Docs](docs/) - Implementation details
