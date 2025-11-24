@@ -1361,6 +1361,17 @@ def process_youtube_video(
             )
             db_manager.insert_project(project, transcript=full_text, summary=summary, key_factors=key_factors)
             logger.info("Project saved to database")
+            
+            # Cleanup audio file after successful database save
+            update_progress(98, "🗑️ Cleaning up audio file...")
+            try:
+                if audio_path.exists():
+                    audio_path.unlink()
+                    logger.info(f"Cleaned up audio file: {audio_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup audio file {audio_path}: {cleanup_error}")
+                # Don't fail the whole process if cleanup fails
+                
         except Exception as e:
             logger.warning(f"Failed to save to database: {e}")
             # Don't fail the whole process if database save fails
