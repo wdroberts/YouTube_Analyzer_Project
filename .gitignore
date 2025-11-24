@@ -40,6 +40,7 @@ env/
 
 # Project specific
 outputs/
+backups/
 *.log
 app.log
 
