@@ -263,6 +263,7 @@ Ask questions about any analyzed video or document and get AI-powered answers ba
 - 🎯 **Contextual**: Knows the title and summary for better context
 - 💬 **Multi-Question**: Ask multiple questions in the same session
 - ⚡ **Fast**: Typical response time 5-15 seconds
+- 💰 **Cost Tracking**: Shows token usage and API cost for each answer
 
 ### Tips for Best Results:
 
@@ -270,6 +271,7 @@ Ask questions about any analyzed video or document and get AI-powered answers ba
 ✅ **Ask one thing at a time**: Get focused answers  
 ✅ **Reference the content**: Use terms/names from the video/document  
 ✅ **Follow up**: Ask clarifying questions based on previous answers  
+💰 **Watch costs**: Each question uses API tokens - be mindful of repeated similar questions  
 
 ### Example Q&A Session:
 
@@ -289,7 +291,21 @@ where the network learns by calculating errors and adjusting
 weights backward through the layers. They used the analogy 
 of "learning from mistakes" - the network sees where it was 
 wrong and corrects itself...
+
+💰 API Usage: 2,847 tokens (~$0.0009)
+🕐 Asked at: 2025-11-24 14:32:15
+
+You: Thanks! [Close Q&A]
+
+💡 Session Summary: 2 question(s) asked | 4,123 tokens used (~$0.0015)
 ```
+
+### Cost & Performance:
+
+- 💰 **Cost**: Approximately $0.0005 - $0.003 per question (varies by length)
+- 🔄 **Caching**: Identical questions are cached (free repeat answers)
+- ⚡ **Rate Limiting**: 1 second minimum between API calls
+- 📊 **Transparency**: See exact token usage and cost for each answer
 
 ### Limitations:
 

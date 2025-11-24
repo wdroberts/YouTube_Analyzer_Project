@@ -267,7 +267,7 @@ def render_project_details(db_manager: DatabaseManager, project: Project, output
                             st.error("❌ No transcript available for this project.")
                         else:
                             # Get answer from Q&A service (with configurable parameters)
-                            answer = answer_question_from_transcript(
+                            answer, tokens_used, is_cached = answer_question_from_transcript(
                                 question=question,
                                 transcript=transcript,
                                 title=project.title or project.content_title or "Untitled",
@@ -279,16 +279,25 @@ def render_project_details(db_manager: DatabaseManager, project: Project, output
                                 max_context_length=config.qa_max_context_chars
                             )
                             
+                            # Calculate approximate cost (GPT-4o-mini pricing: $0.150/1M input, $0.600/1M output)
+                            # Rough estimate: assume 70% input, 30% output
+                            input_tokens = int(tokens_used * 0.7)
+                            output_tokens = int(tokens_used * 0.3)
+                            cost = (input_tokens * 0.150 / 1_000_000) + (output_tokens * 0.600 / 1_000_000)
+                            
                             # Initialize conversation history if needed
                             history_key = f"qa_history_{project.id}"
                             if history_key not in st.session_state:
                                 st.session_state[history_key] = []
                             
-                            # Add to conversation history
+                            # Add to conversation history with token info
                             st.session_state[history_key].append({
                                 'question': question,
                                 'answer': answer,
-                                'timestamp': datetime.now().isoformat()
+                                'timestamp': datetime.now().isoformat(),
+                                'tokens_used': tokens_used,
+                                'is_cached': is_cached,
+                                'cost': cost
                             })
                             
                             # Also store in old key for compatibility
@@ -309,12 +318,35 @@ def render_project_details(db_manager: DatabaseManager, project: Project, output
                 st.write(f"**Q{i}:** {qa['question']}")
                 st.markdown(qa['answer'])
                 
+                # Show token usage and cost info
+                tokens = qa.get('tokens_used', 0)
+                is_cached = qa.get('is_cached', False)
+                cost = qa.get('cost', 0.0)
+                
+                if is_cached:
+                    st.caption(f"💰 **Cached response** (0 tokens used, $0.000)")
+                elif tokens > 0:
+                    st.caption(f"💰 **API Usage:** {tokens:,} tokens (~${cost:.4f})")
+                
                 # Show timestamp for older questions
                 if i < len(st.session_state[history_key]):
-                    st.caption(f"Asked at: {qa['timestamp'][:19].replace('T', ' ')}")
+                    timestamp_str = qa['timestamp'][:19].replace('T', ' ')
+                    st.caption(f"🕐 Asked at: {timestamp_str}")
                 st.write("---")
             
-            st.caption(f"💡 Tip: Asked {len(st.session_state[history_key])} question(s). Ask another or click 'Close' to exit.")
+            # Calculate session totals
+            total_tokens = sum(qa.get('tokens_used', 0) for qa in st.session_state[history_key] if not qa.get('is_cached', False))
+            total_cost = sum(qa.get('cost', 0.0) for qa in st.session_state[history_key] if not qa.get('is_cached', False))
+            cached_count = sum(1 for qa in st.session_state[history_key] if qa.get('is_cached', False))
+            
+            session_summary = f"💡 **Session Summary:** {len(st.session_state[history_key])} question(s) asked"
+            if cached_count > 0:
+                session_summary += f" ({cached_count} cached)"
+            if total_tokens > 0:
+                session_summary += f" | {total_tokens:,} tokens used (~${total_cost:.4f})"
+            
+            st.info(session_summary)
+            st.caption("Ask another question or click 'Close' to exit.")
     
     # Delete project
     st.write("---")

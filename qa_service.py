@@ -31,9 +31,15 @@ def answer_question_from_transcript(
     temperature: float = 0.7,
     max_tokens: int = 800,
     max_context_length: int = 15000
-) -> str:
+) -> Tuple[str, int, bool]:
     """
     Answer questions about transcript content using GPT.
+    
+    Returns:
+        Tuple of (answer, tokens_used, is_cached)
+        - answer: The AI-generated response
+        - tokens_used: Number of API tokens consumed (0 if cached)
+        - is_cached: True if response was retrieved from cache
     
     This function takes a user's question and generates an AI-powered answer
     based on the provided transcript and optional summary. It intelligently
@@ -81,7 +87,7 @@ def answer_question_from_transcript(
             f"Cache HIT for question (age: {age_seconds:.0f}s, "
             f"tokens saved: {cached_tokens})"
         )
-        return cached_answer
+        return cached_answer, cached_tokens, True  # Return tuple: (answer, tokens, is_cached)
     
     # Rate limiting: Ensure minimum time between API calls
     global _last_qa_call_time
@@ -185,12 +191,12 @@ def answer_question_from_transcript(
         logger.info(f"Cached response (key: {cache_key}, cache size: {len(_response_cache)})")
         
         logger.info(f"Q&A answer generated successfully ({len(answer)} chars)")
-        return answer
+        return answer, total_tokens, False  # Return tuple: (answer, tokens_used, is_cached)
         
     except Exception as e:
         error_msg = f"Error generating answer: {str(e)}"
         logger.error(error_msg)
-        return f"❌ {error_msg}\n\nPlease try again or rephrase your question."
+        return f"❌ {error_msg}\n\nPlease try again or rephrase your question.", 0, False
 
 
 def estimate_tokens(text: str) -> int:
