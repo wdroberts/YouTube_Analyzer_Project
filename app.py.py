@@ -375,6 +375,8 @@ def format_url_for_display(url: str, max_length: Optional[int] = None) -> str:
     Returns:
         Formatted URL string
     """
+    if not url:
+        return ""
     if max_length is None:
         max_length = config.url_display_max_length
     if len(url) > max_length:
@@ -1902,16 +1904,19 @@ with st.sidebar:
         # Convert to dict format for compatibility
         projects = []
         for p in db_projects:
+            # Ensure source is a string
+            source = str(p.source) if p.source else ''
+            
             proj_dict = {
                 'project_dir': p.project_dir,
-                'title': p.title,
+                'title': p.title or '',
                 'transcript_title': p.content_title if p.type == 'youtube' else None,
                 'content_title': p.content_title if p.type == 'document' else None,
-                'url': p.source if p.type == 'youtube' else None,
-                'filename': p.source if p.type == 'document' else None,
-                'timestamp': p.created_at,
-                'word_count': p.word_count,
-                'tags': p.tags
+                'url': source if p.type == 'youtube' else None,
+                'filename': source if p.type == 'document' else None,
+                'timestamp': p.created_at or '',
+                'word_count': p.word_count or 0,
+                'tags': list(p.tags) if p.tags else []
             }
             projects.append(proj_dict)
     except Exception as e:
@@ -1962,13 +1967,16 @@ with st.sidebar:
                     project_name = truncate_title(title)
                 else:
                     # Fallback to video ID extraction
-                    vid_id = extract_video_id(proj['url'])
-                    if vid_id:
-                        # Determine if it's a short or regular video
-                        if '/shorts/' in proj['url']:
-                            project_name = f"Short {vid_id[:11]}"
+                    if proj.get('url'):
+                        vid_id = extract_video_id(str(proj['url']))
+                        if vid_id:
+                            # Determine if it's a short or regular video
+                            if '/shorts/' in str(proj['url']):
+                                project_name = f"Short {vid_id[:11]}"
+                            else:
+                                project_name = f"Video {vid_id[:11]}"
                         else:
-                            project_name = f"Video {vid_id[:11]}"
+                            project_name = f"Video {idx + 1}"
                     else:
                         project_name = f"Video {idx + 1}"
             elif 'filename' in proj:
@@ -1985,14 +1993,14 @@ with st.sidebar:
             
             with st.expander(f"{project_icon} {project_name}", expanded=False):
                 # Display project info
-                if 'url' in proj:
+                if 'url' in proj and proj['url']:
                     st.write("**Type:** YouTube Video")
                     if 'transcript_title' in proj and proj['transcript_title']:
                         st.write(f"**Content Title:** {proj['transcript_title']}")
                     if 'title' in proj and proj['title']:
                         st.write(f"**Video Title:** {proj['title']}")
                     st.write(f"**URL:** {format_url_for_display(proj['url'])}")
-                elif 'filename' in proj:
+                elif 'filename' in proj and proj['filename']:
                     st.write("**Type:** Document")
                     if 'content_title' in proj and proj['content_title']:
                         st.write(f"**Content Title:** {proj['content_title']}")

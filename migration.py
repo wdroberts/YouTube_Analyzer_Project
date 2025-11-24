@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 from typing import List, Tuple
 
-from database import DatabaseManager, Project
+from database import DatabaseManager, Project, MigrationError, DuplicateProjectError
 
 logger = logging.getLogger(__name__)
 

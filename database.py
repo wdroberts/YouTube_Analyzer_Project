@@ -8,10 +8,34 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# -----------------------------
+# CUSTOM EXCEPTIONS
+# -----------------------------
+class DatabaseError(Exception):
+    """Base exception for database operations."""
+    pass
+
+
+class ProjectNotFoundError(DatabaseError):
+    """Raised when a project is not found in the database."""
+    pass
+
+
+class DuplicateProjectError(DatabaseError):
+    """Raised when attempting to insert a duplicate project."""
+    pass
+
+
+class MigrationError(Exception):
+    """Raised when migration operations fail."""
+    pass
 
 
 @dataclass
@@ -73,27 +97,27 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Projects table
+            # Projects table with CHECK constraints
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS projects (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    type TEXT NOT NULL,
+                    type TEXT NOT NULL CHECK(type IN ('youtube', 'document')),
                     title TEXT,
                     content_title TEXT,
-                    source TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK(length(source) > 0),
                     created_at TEXT NOT NULL,
-                    word_count INTEGER DEFAULT 0,
-                    segment_count INTEGER DEFAULT 0,
-                    project_dir TEXT NOT NULL UNIQUE,
+                    word_count INTEGER DEFAULT 0 CHECK(word_count >= 0),
+                    segment_count INTEGER DEFAULT 0 CHECK(segment_count >= 0),
+                    project_dir TEXT NOT NULL UNIQUE CHECK(length(project_dir) > 0),
                     notes TEXT DEFAULT ''
                 )
             """)
             
-            # Tags table
+            # Tags table with CHECK constraints
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tags (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE
+                    name TEXT NOT NULL UNIQUE CHECK(length(trim(name)) > 0)
                 )
             """)
             
@@ -144,7 +168,22 @@ class DatabaseManager:
             
         Returns:
             ID of inserted project
+            
+        Raises:
+            DuplicateProjectError: If project_dir already exists
+            DatabaseError: If insertion fails
         """
+        # Check for duplicate project_dir
+        try:
+            existing = self.get_project_by_dir(project.project_dir)
+            if existing:
+                raise DuplicateProjectError(
+                    f"Project with directory '{project.project_dir}' already exists"
+                )
+        except ProjectNotFoundError:
+            # Good - project doesn't exist, we can insert
+            pass
+        
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
@@ -181,6 +220,15 @@ class DatabaseManager:
                 self._add_tag_to_project(cursor, project_id, tag_name)
             
             logger.info(f"Inserted project {project_id}: {project.title}")
+            
+            # Clear tag cache if new tags were added
+            if project.tags:
+                self.clear_tag_cache()
+            
+            # Clear tag cache if new tags were added
+            if project.tags:
+                self.clear_tag_cache()
+            
             return project_id
     
     def _add_tag_to_project(self, cursor, project_id: int, tag_name: str):
@@ -258,7 +306,7 @@ class DatabaseManager:
             
             logger.info(f"Deleted project {project_id}")
     
-    def get_project(self, project_id: int) -> Optional[Project]:
+    def get_project(self, project_id: int) -> Project:
         """
         Get a single project by ID.
         
@@ -266,7 +314,10 @@ class DatabaseManager:
             project_id: Project ID
             
         Returns:
-            Project object or None
+            Project object
+            
+        Raises:
+            ProjectNotFoundError: If project with given ID doesn't exist
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -275,7 +326,7 @@ class DatabaseManager:
             row = cursor.fetchone()
             
             if not row:
-                return None
+                raise ProjectNotFoundError(f"Project with ID {project_id} not found")
             
             # Get tags
             cursor.execute("""
@@ -307,7 +358,7 @@ class DatabaseManager:
             project_dir: Project directory name
             
         Returns:
-            Project object or None
+            Project object or None if not found
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -316,7 +367,10 @@ class DatabaseManager:
             row = cursor.fetchone()
             
             if row:
-                return self.get_project(row['id'])
+                try:
+                    return self.get_project(row['id'])
+                except ProjectNotFoundError:
+                    return None
             return None
     
     def list_projects(self, project_type: Optional[str] = None,
@@ -448,11 +502,21 @@ class DatabaseManager:
         Args:
             project_id: Project ID
             tag_name: Tag name
+            
+        Raises:
+            ProjectNotFoundError: If project doesn't exist
         """
+        # Validate tag name
+        if not tag_name or not tag_name.strip():
+            raise ValueError("Tag name cannot be empty")
+        
         with self.get_connection() as conn:
             cursor = conn.cursor()
             self._add_tag_to_project(cursor, project_id, tag_name)
             logger.info(f"Added tag '{tag_name}' to project {project_id}")
+        
+        # Clear cache since tags changed
+        self.clear_tag_cache()
     
     def remove_tag(self, project_id: int, tag_name: str):
         """
@@ -461,6 +525,9 @@ class DatabaseManager:
         Args:
             project_id: Project ID
             tag_name: Tag name
+            
+        Raises:
+            ProjectNotFoundError: If project doesn't exist
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -472,18 +539,26 @@ class DatabaseManager:
             """, (project_id, tag_name))
             
             logger.info(f"Removed tag '{tag_name}' from project {project_id}")
+        
+        # Clear cache since tags might have changed
+        self.clear_tag_cache()
     
-    def get_all_tags(self) -> List[str]:
+    @lru_cache(maxsize=1)
+    def get_all_tags(self) -> tuple:
         """
-        Get all unique tags in the database.
+        Get all unique tags in the database (cached).
         
         Returns:
-            List of tag names
+            Tuple of tag names (tuple for caching, convert to list if needed)
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT name FROM tags ORDER BY name")
-            return [row[0] for row in cursor.fetchall()]
+            return tuple(row[0] for row in cursor.fetchall())
+    
+    def clear_tag_cache(self):
+        """Clear the tag cache after modifications."""
+        self.get_all_tags.cache_clear()
     
     def get_statistics(self) -> Dict[str, Any]:
         """
