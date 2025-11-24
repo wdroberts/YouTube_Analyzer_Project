@@ -1,0 +1,88 @@
+# YouTube Analyzer Project - Development Standards
+
+## GOLDEN RULE: Incremental Development with Testing
+- **ALWAYS implement changes in reasonably small chunks**
+- **ALWAYS test before going to the next step**
+- If a task has multiple parts, break it into 3-5 logical steps maximum
+- Complete step → Test → Commit → Move to next step
+- NEVER accumulate multiple untested changes
+- If something breaks, revert immediately and try smaller chunks
+
+## Testing Protocol
+- Test immediately after making ANY change
+- Run the app with: .venv\Scripts\streamlit.exe run app.py.py
+- Test checklist after each chunk:
+  * App starts without errors
+  * UI renders completely
+  * Main workflows work (add video, view library, Q&A)
+  * No hanging or freezing
+- If app hangs or breaks, STOP and revert last change
+
+## Code Changes (Small Chunks)
+- One logical change at a time (typically 10-50 lines)
+- Examples of "reasonable chunks":
+  * Add one function
+  * Modify one component
+  * Fix one bug
+  * Add one feature (if small)
+- Create a git commit after each working chunk
+- Use descriptive commit messages
+- If uncertain, create a feature branch first
+
+## Debugging Process
+- Add logging BEFORE making fixes (don't guess)
+- Test in isolation when possible
+- Always keep a known-working version in git
+- Document what broke and how it was fixed
+- If debugging takes >3 attempts, try a different approach
+
+## Git Workflow (Safety Net)
+- Commit working code after each successful test
+- Commit message should describe the chunk: "Add XYZ function" or "Fix ABC issue"
+- Never force push unless explicitly confirmed
+- Tag stable releases: git tag v1.0-stable-[date]
+- Keep master branch stable and working
+
+## UI Changes (High Risk - Extra Small Chunks!)
+- Create feature branch: git checkout -b ui-experiment
+- Change ONE component at a time
+- Test after EACH component change
+- UI changes have historically caused hanging issues
+- Only merge to master when fully working
+- Avoid complex HTML with unsafe_allow_html
+- Use native Streamlit components when possible
+
+## File Operations
+- Check if file exists before reading/modifying
+- Use Path objects from pathlib (not strings)
+- Validate user inputs before processing
+- Handle exceptions specifically (no bare except)
+
+## Dependencies
+- Document any new package installations
+- Test that changes work in virtual environment
+- Keep requirements.txt updated
+
+## Communication
+- Explain WHAT is being changed and WHY
+- Show the chunk size and testing plan upfront
+- Ask for confirmation on risky operations
+- Provide rollback plan for major changes
+- After each chunk: "Change complete. Please test before continuing."
+
+## Multi-Step Tasks
+When given a large task:
+1. Break it down into 3-5 small chunks
+2. Present the breakdown plan to user
+3. Implement chunk 1 → STOP and request testing
+4. Wait for confirmation before chunk 2
+5. Repeat until task complete
+
+Example:
+Task: "Add new feature X"
+→ Chunk 1: Add backend function (test it)
+→ Chunk 2: Add UI component (test it)
+→ Chunk 3: Connect them together (test it)
+→ Chunk 4: Add error handling (test it)
+→ Chunk 5: Update documentation (review it)
+
