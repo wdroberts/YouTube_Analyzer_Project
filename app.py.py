@@ -1933,6 +1933,10 @@ if mode == "YouTube Video":
     process_button = st.button("Process Video")
     
     if process_button:
+        # Clear previous results when starting new video
+        if 'youtube_results' in st.session_state:
+            st.session_state.pop('youtube_results')
+        
         if not url.strip():
             st.error("Please enter a valid YouTube URL.")
             st.stop()
@@ -1981,6 +1985,9 @@ if mode == "YouTube Video":
             status_text.empty()
             
             st.success("✅ Processing complete!")
+            
+            # Save results to session state for persistent display
+            st.session_state['youtube_results'] = results
             
             # Render results using UI function
             render_youtube_results(results)
@@ -2043,6 +2050,18 @@ if mode == "YouTube Video":
             logger.error(f"Unexpected error: {e}")
             if st.checkbox("Show technical details"):
                 st.exception(e)
+    
+    # Display persistent results if available (even after clicking download buttons)
+    if 'youtube_results' in st.session_state and not process_button:
+        st.divider()
+        st.info("📥 **Previous Results** - Downloads remain available until you process a new video")
+        
+        # Add clear button
+        if st.button("🗑️ Clear Results"):
+            st.session_state.pop('youtube_results')
+            st.rerun()
+        
+        render_youtube_results(st.session_state['youtube_results'])
 
 else:  # Document File mode
     st.subheader("📄 Document Analysis")
@@ -2054,6 +2073,10 @@ else:  # Document File mode
     process_doc_button = st.button("Process Document")
     
     if process_doc_button:
+        # Clear previous results when starting new document
+        if 'document_results' in st.session_state:
+            st.session_state.pop('document_results')
+        
         if uploaded_file is None:
             st.error("Please upload a document file.")
             st.stop()
@@ -2109,6 +2132,9 @@ else:  # Document File mode
             
             st.success("✅ Processing complete!")
             
+            # Save results to session state for persistent display
+            st.session_state['document_results'] = results
+            
             # Render results using UI function
             render_document_results(results)
         
@@ -2153,6 +2179,18 @@ else:  # Document File mode
             logger.error(f"Unexpected document error: {e}")
             if st.checkbox("Show technical details", key="doc_details"):
                 st.exception(e)
+    
+    # Display persistent results if available (even after clicking download buttons)
+    if 'document_results' in st.session_state and not process_doc_button:
+        st.divider()
+        st.info("📥 **Previous Results** - Downloads remain available until you process a new document")
+        
+        # Add clear button
+        if st.button("🗑️ Clear Results", key="clear_doc_results"):
+            st.session_state.pop('document_results')
+            st.rerun()
+        
+        render_document_results(st.session_state['document_results'])
 
 st.markdown("---")
 st.caption("Built with ❤️ using Python, Streamlit, yt-dlp, and OpenAI Whisper + GPT-4o-mini")
