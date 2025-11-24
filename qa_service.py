@@ -3,11 +3,16 @@ YouTube Analyzer - Q&A Service Module
 Provides AI-powered question answering for analyzed content.
 """
 import logging
+import time
 from typing import Optional
 
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
+
+# Rate limiting state
+_last_qa_call_time = 0.0
+_min_call_interval = 1.0  # Minimum seconds between API calls
 
 
 def answer_question_from_transcript(
@@ -59,6 +64,14 @@ def answer_question_from_transcript(
             "OpenAI client not initialized. Please provide a valid OpenAI client instance."
         )
     
+    # Rate limiting: Ensure minimum time between API calls
+    global _last_qa_call_time
+    time_since_last_call = time.time() - _last_qa_call_time
+    if time_since_last_call < _min_call_interval:
+        wait_time = _min_call_interval - time_since_last_call
+        logger.info(f"Rate limiting: waiting {wait_time:.2f}s before API call")
+        time.sleep(wait_time)
+    
     try:
         # Build context for the AI
         context = f"Content Title: {title}\n\n"
@@ -67,6 +80,26 @@ def answer_question_from_transcript(
             context += f"Summary:\n{summary}\n\n"
         
         context += f"Full Transcript:\n{transcript}"
+        
+        # Estimate tokens before API call
+        estimated_tokens = (
+            estimate_tokens(context) + 
+            estimate_tokens(question) + 
+            max_tokens  # Reserve for response
+        )
+        
+        # GPT-4o-mini has 128K token context window
+        max_model_tokens = 128000
+        
+        if estimated_tokens > max_model_tokens:
+            logger.warning(
+                f"Estimated tokens ({estimated_tokens:,}) exceeds model limit ({max_model_tokens:,}). "
+                f"Applying aggressive truncation."
+            )
+            # More aggressive truncation to ensure we stay under limit
+            max_context_length = min(max_context_length, 10000)
+        
+        logger.info(f"Estimated tokens for Q&A: {estimated_tokens:,}")
         
         # Limit context length to avoid token limits
         # Keep last portion of transcript which usually contains conclusions
@@ -87,6 +120,9 @@ def answer_question_from_transcript(
                 context = f"{header}{transcript[-available_for_transcript:]}"
         
         logger.info(f"Answering Q&A question about '{title}': {question[:100]}...")
+        
+        # Update rate limiter timestamp
+        _last_qa_call_time = time.time()
         
         # Call OpenAI API
         response = client.chat.completions.create(
