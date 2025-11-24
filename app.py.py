@@ -28,6 +28,7 @@ import yt_dlp
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydub import AudioSegment
+from faster_whisper import WhisperModel
 
 # Load environment variables from .env file
 load_dotenv()
@@ -805,7 +806,7 @@ def _transcribe_single_file(audio_path: Path) -> Any:
                 ) from e
 
 
-def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
+def transcribe_audio_with_timestamps(audio_path: Path, progress_callback: Optional[callable] = None) -> Any:
     """
     Transcribe audio file, automatically splitting if too large for Whisper API.
     
@@ -839,12 +840,23 @@ def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
     else:
         # Multiple chunks - transcribe and merge
         logger.info(f"Transcribing {len(audio_chunks)} audio chunks...")
+        
+        # Update progress callback if provided
+        if progress_callback:
+            progress_callback(30, f"🎤 Transcribing {len(audio_chunks)} audio chunks...")
+        
         all_segments = []
         cumulative_time = 0.0
         full_text_parts = []
         
         for i, chunk_path in enumerate(audio_chunks):
-            logger.info(f"Processing chunk {i+1}/{len(audio_chunks)}...")
+            # Calculate progress (30-50% range for transcription)
+            chunk_progress = 30 + int((i / len(audio_chunks)) * 20)
+            progress_msg = f"🎤 Transcribing chunk {i+1}/{len(audio_chunks)}..."
+            
+            logger.info(progress_msg)
+            if progress_callback:
+                progress_callback(chunk_progress, progress_msg)
             
             # Transcribe this chunk
             result = _transcribe_single_file(chunk_path)
@@ -887,6 +899,9 @@ def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
         combined_text = " ".join(full_text_parts)
         logger.info(f"Successfully merged {len(audio_chunks)} chunks into single transcript")
         
+        if progress_callback:
+            progress_callback(50, f"✅ Merged {len(audio_chunks)} chunks successfully")
+        
         # Cleanup chunk files
         chunk_dir = audio_path.parent / "chunks"
         if chunk_dir.exists():
@@ -897,6 +912,104 @@ def transcribe_audio_with_timestamps(audio_path: Path) -> Any:
                 logger.warning(f"Failed to cleanup chunks directory: {e}")
         
         return CombinedTranscriptionResult(all_segments, combined_text)
+
+
+# -----------------------------
+# LOCAL GPU TRANSCRIPTION
+# -----------------------------
+# Global variable to cache the loaded model
+_gpu_model_cache = None
+
+def transcribe_audio_with_local_gpu(audio_path: Path, progress_callback: Optional[callable] = None) -> Any:
+    """
+    Transcribe audio file using local GPU with faster-whisper.
+    
+    Uses the GTX 1080 GPU for fast, free transcription.
+    Model is cached after first load for better performance.
+    
+    Args:
+        audio_path: Path to audio file
+        progress_callback: Optional callback function(progress: int, message: str) for UI updates
+        
+    Returns:
+        Transcription result object with segments and text (compatible with OpenAI format)
+        
+    Raises:
+        TranscriptionError: If transcription fails
+    """
+    global _gpu_model_cache
+    
+    try:
+        # Load model (cached after first use)
+        if _gpu_model_cache is None:
+            logger.info("Loading Whisper model on GPU (first time, may take a few seconds)...")
+            if progress_callback:
+                progress_callback(30, "🎮 Loading Whisper model on GPU...")
+            
+            # Use small model with int8 for GTX 1080 (best balance of speed/quality)
+            _gpu_model_cache = WhisperModel("small", device="cuda", compute_type="int8")
+            logger.info("Whisper model loaded on GPU")
+        
+        if progress_callback:
+            progress_callback(32, "🎮 Transcribing with local GPU (faster-whisper)...")
+        
+        logger.info(f"Transcribing {audio_path.name} with local GPU")
+        
+        # Transcribe
+        segments_iter, info = _gpu_model_cache.transcribe(
+            str(audio_path),
+            language="en",
+            beam_size=5,
+            word_timestamps=False
+        )
+        
+        # Collect segments and build text
+        segments_list = []
+        full_text_parts = []
+        last_progress_update = 0
+        
+        for segment in segments_iter:
+            # Convert faster-whisper segment to compatible format
+            seg_dict = {
+                'start': segment.start,
+                'end': segment.end,
+                'text': segment.text
+            }
+            segments_list.append(seg_dict)
+            full_text_parts.append(segment.text)
+            
+            # Update progress periodically (every 5%)
+            if info.duration > 0:
+                progress_pct = (segment.end / info.duration) * 100
+                if progress_pct - last_progress_update >= 5:
+                    current_progress = 32 + int((progress_pct / 100) * 18)  # 32-50% range
+                    if progress_callback:
+                        progress_callback(current_progress, f"🎮 GPU transcribing... {progress_pct:.0f}%")
+                    last_progress_update = progress_pct
+        
+        full_text = " ".join(full_text_parts)
+        
+        logger.info(f"GPU transcription complete: {len(segments_list)} segments, {len(full_text.split())} words")
+        
+        # Create result object compatible with OpenAI format
+        class GPUTranscriptionResult:
+            """GPU transcription result compatible with OpenAI Whisper format."""
+            def __init__(self, segments: List[Dict], text: str):
+                # Convert dict segments to objects with attributes
+                class Segment:
+                    def __init__(self, start, end, text):
+                        self.start = start
+                        self.end = end
+                        self.text = text
+                
+                self.segments = [Segment(s['start'], s['end'], s['text']) for s in segments]
+                self.text = text
+        
+        return GPUTranscriptionResult(segments_list, full_text)
+        
+    except Exception as e:
+        logger.error(f"GPU transcription failed: {e}")
+        raise TranscriptionError(f"GPU transcription failed: {str(e)}") from e
 
 
 # -----------------------------
@@ -1067,7 +1180,8 @@ def extract_key_factors(text: str) -> str:
 def process_youtube_video(
     url: str, 
     session_dir: Path,
-    progress_callback: Optional[callable] = None
+    progress_callback: Optional[callable] = None,
+    use_local_gpu: bool = False
 ) -> Dict[str, Any]:
     """
     Process a YouTube video - pure business logic with no UI code.
@@ -1077,6 +1191,7 @@ def process_youtube_video(
         url: YouTube video URL
         session_dir: Directory to save output files
         progress_callback: Optional callback function(progress: int, message: str) for UI updates
+        use_local_gpu: If True, use local GPU transcription; if False, use OpenAI API
         
     Returns:
         Dictionary with all processing results and metadata:
@@ -1129,10 +1244,16 @@ def process_youtube_video(
         if file_size > config.max_audio_file_size_mb:
             logger.info(f"Audio file ({file_size:.2f} MB) exceeds single-file limit. Will use automatic chunking.")
         
-        # Transcribe audio
-        update_progress(30, "🎤 Transcribing audio with Whisper API...")
-        logger.info("Step 2/6: Transcribing audio with Whisper API...")
-        result = transcribe_audio_with_timestamps(audio_path)
+        # Transcribe audio (choose method based on user selection)
+        if use_local_gpu:
+            update_progress(30, "🎮 Transcribing audio with local GPU...")
+            logger.info("Step 2/6: Transcribing audio with local GPU (faster-whisper)...")
+            result = transcribe_audio_with_local_gpu(audio_path, progress_callback=progress_callback)
+        else:
+            update_progress(30, "🎤 Transcribing audio with OpenAI Whisper API...")
+            logger.info("Step 2/6: Transcribing audio with OpenAI Whisper API...")
+            result = transcribe_audio_with_timestamps(audio_path, progress_callback=progress_callback)
+        
         segments = result.segments if hasattr(result, 'segments') else []
         full_text = result.text if hasattr(result, 'text') else ""
         logger.info(f"Transcription received: {len(segments)} segments, {len(full_text.split())} words")
@@ -1792,6 +1913,23 @@ st.markdown("---")
 if mode == "YouTube Video":
     st.subheader("🎧 YouTube Video Analysis")
     url = st.text_input("Enter a YouTube URL:", "")
+    
+    # Transcription method selection
+    st.markdown("### Transcription Method")
+    transcription_method = st.radio(
+        "Choose how to transcribe:",
+        options=["Local GPU (Faster, FREE)", "OpenAI API (Best Quality)"],
+        index=0,  # Default to Local GPU
+        help="Local GPU: 2x faster, free, ~90-95% accuracy. OpenAI API: Best quality (~98-99%), ~$0.60/video"
+    )
+    use_local_gpu = (transcription_method == "Local GPU (Faster, FREE)")
+    
+    # Show info about selected method
+    if use_local_gpu:
+        st.info("🎮 **Using Local GPU (GTX 1080)**: ~5 min for 100-min video, FREE, good accuracy")
+    else:
+        st.info("☁️ **Using OpenAI API**: ~10 min for 100-min video, ~$0.60, best accuracy")
+    
     process_button = st.button("Process Video")
     
     if process_button:
@@ -1835,7 +1973,7 @@ if mode == "YouTube Video":
                 status_text.text(message)
             
             # Call business logic function with progress callback
-            results = process_youtube_video(url, session_dir, progress_callback=update_ui)
+            results = process_youtube_video(url, session_dir, progress_callback=update_ui, use_local_gpu=use_local_gpu)
             
             # Brief pause to show completion
             time.sleep(0.5)
