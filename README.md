@@ -1,6 +1,6 @@
 # 🎬 YouTube Analyzer Project
 
-> AI-powered YouTube video and document analyzer with transcription, summarization, and intelligent insights extraction using OpenAI Whisper and GPT-4.
+> AI-powered YouTube video and document analyzer with transcription, summarization, intelligent insights extraction, and interactive Q&A using OpenAI Whisper and GPT-4.
 
 [![Tests](https://github.com/wdroberts/YouTube_Analyzer_Project/actions/workflows/tests.yml/badge.svg)](https://github.com/wdroberts/YouTube_Analyzer_Project/actions/workflows/tests.yml)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
@@ -36,6 +36,16 @@
 - **Export Tools** - Export database as JSON or CSV
 - **D: Drive Storage** - All data stored on configurable location (default: D: drive)
 
+### 💬 AI-Powered Q&A
+- **Interactive Content Q&A** - Ask questions about any analyzed video or document
+- **Context-Aware Answers** - AI responds based on actual transcript content
+- **Multi-Question Sessions** - Ask multiple questions in one conversation
+- **Response Caching** - Identical questions are cached for instant, free answers
+- **Cost Transparency** - See token usage and API cost for each answer (~$0.0005-$0.003 per question)
+- **Session Summaries** - Track total tokens and costs per Q&A session
+- **Smart Truncation** - Handles long transcripts intelligently (up to 15,000 characters)
+- **Rate Limiting** - Built-in 1-second intervals between API calls
+
 ### 🎯 Advanced Features
 - **Database Explorer** - Comprehensive UI for browsing and managing projects
 - **Advanced Search** - Filter by type, tags, date, and content
@@ -46,6 +56,7 @@
 - **Error Handling** - Robust retry logic and graceful failure handling
 - **Progress Tracking** - 11-step progress for videos, 9-step for documents
 - **Automatic Migration** - Seamlessly migrate existing projects to new database
+- **Audio Cleanup** - Automatically deletes audio files after transcription (saves ~80MB per video)
 
 ---
 
@@ -145,6 +156,35 @@
 - **Tags & Notes**: Add custom tags and notes to organize projects
 - **Statistics Dashboard**: View analytics (total projects, words, top tags, timeline)
 - **Export**: Export database as JSON or CSV, create backups
+
+#### Q&A with Your Content
+1. Navigate to **Database Explorer** → **Table Viewer**
+2. Expand any project to view details
+3. Scroll to **"💬 Ask Questions About This Content"**
+4. Click **"💬 Start Q&A"** to begin
+5. Ask questions like:
+   - "What are the main topics discussed?"
+   - "What evidence supports the main argument?"
+   - "Were any tools or resources mentioned?"
+6. View token usage and cost for each answer
+7. Ask follow-up questions or click **"Close"** when done
+
+**Example Q&A Session:**
+```
+You: What are the main topics discussed?
+
+AI: Based on the transcript, the main topics are:
+1. Neural network architecture
+2. Backpropagation algorithm
+3. Gradient descent optimization
+...
+
+💰 API Usage: 2,847 tokens (~$0.0009)
+
+💡 Session Summary: 3 question(s) asked | 6,234 tokens used (~$0.0023)
+```
+
+See [User Guide](USER_GUIDE.md#-qa-feature---ask-questions-about-your-content) for detailed Q&A documentation.
 
 ---
 
