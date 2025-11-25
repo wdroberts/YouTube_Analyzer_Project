@@ -200,6 +200,86 @@ def render_project_details(db_manager: DatabaseManager, project: Project, output
                 st.success(f"Removed tag: {tag_to_remove}")
                 st.rerun()
     
+    # Content viewing sections
+    st.write("---")
+    st.write("**📄 View Content:**")
+    
+    # Get project content from database
+    try:
+        content = db_manager.get_project_content(project.id)
+        
+        # Transcript or Extracted Text
+        if project.type == 'youtube':
+            transcript = content.get('transcript', '')
+            if transcript:
+                with st.expander("📝 View Transcript", expanded=False):
+                    st.text_area(
+                        "Transcript",
+                        value=transcript,
+                        height=300,
+                        key=f"transcript_view_{project.id}",
+                        label_visibility="collapsed"
+                    )
+                    st.download_button(
+                        "📥 Download Transcript",
+                        data=transcript,
+                        file_name=f"{project.title or 'transcript'}_transcript.txt",
+                        mime="text/plain",
+                        key=f"download_transcript_{project.id}"
+                    )
+            else:
+                st.info("No transcript available for this project.")
+        else:  # document
+            extracted_text = content.get('transcript', '')  # Documents use same field
+            if extracted_text:
+                with st.expander("📄 View Extracted Text", expanded=False):
+                    st.text_area(
+                        "Extracted Text",
+                        value=extracted_text,
+                        height=300,
+                        key=f"extracted_view_{project.id}",
+                        label_visibility="collapsed"
+                    )
+                    st.download_button(
+                        "📥 Download Text",
+                        data=extracted_text,
+                        file_name=f"{project.title or 'document'}_text.txt",
+                        mime="text/plain",
+                        key=f"download_extracted_{project.id}"
+                    )
+            else:
+                st.info("No extracted text available for this project.")
+        
+        # Summary
+        summary = content.get('summary', '')
+        if summary:
+            with st.expander("📋 View Summary", expanded=False):
+                st.markdown(summary)
+                st.download_button(
+                    "📥 Download Summary",
+                    data=summary,
+                    file_name=f"{project.title or 'summary'}_summary.txt",
+                    mime="text/plain",
+                    key=f"download_summary_{project.id}"
+                )
+        
+        # Key Factors
+        key_factors = content.get('key_factors', '')
+        if key_factors:
+            with st.expander("🔑 View Key Factors", expanded=False):
+                st.markdown(key_factors)
+                st.download_button(
+                    "📥 Download Key Factors",
+                    data=key_factors,
+                    file_name=f"{project.title or 'key_factors'}_key_factors.txt",
+                    mime="text/plain",
+                    key=f"download_key_factors_{project.id}"
+                )
+    
+    except Exception as e:
+        logger.error(f"Error loading content for project {project.id}: {e}")
+        st.error(f"❌ Error loading content: {str(e)}")
+    
     # Q&A Section
     st.write("---")
     st.write("**💬 Ask Questions About This Content:**")
