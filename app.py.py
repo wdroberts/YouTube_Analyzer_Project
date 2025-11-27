@@ -7,16 +7,18 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import sys
+import unicodedata
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 from urllib.parse import urlparse, parse_qs
 
 # Third-party imports
@@ -29,6 +31,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pydub import AudioSegment
 from faster_whisper import WhisperModel
+from sidebar_ops import record_sidebar_operation
+from telemetry import evaluate_health_alerts
 
 # Load environment variables from .env file
 load_dotenv()
@@ -85,6 +89,17 @@ class APIConnectionError(YouTubeAnalyzerError):
 # LOGGING CONFIGURATION
 # -----------------------------
 
+# Fix Windows console encoding for emoji support before attaching any handlers
+if sys.platform == 'win32':
+    for stream_attr in ("stdout", "stderr"):
+        stream = getattr(sys, stream_attr, None)
+        if stream and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding='utf-8')
+            except (AttributeError, ValueError):
+                # If reconfigure is unavailable or fails, continue gracefully
+                pass
+
 # Configure logging with rotation to prevent log files from growing too large
 logging.basicConfig(
     level=logging.INFO,
@@ -101,28 +116,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Fix Windows console encoding for emoji support
-if sys.platform == 'win32':
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-    except Exception:
-        pass  # If reconfigure fails, continue without it
-
 # -----------------------------
 # CONFIGURATION
 # -----------------------------
 @dataclass
 class Config:
     """Application configuration with validation."""
-    audio_quality: int = int(os.getenv("AUDIO_QUALITY", "96"))
+    audio_quality: int = field(default_factory=lambda: int(os.getenv("AUDIO_QUALITY", "96")))
     summary_max_tokens: int = 1000
     key_factors_max_tokens: int = 1500
     title_max_tokens: int = 50
     title_sample_size: int = 2000
     project_title_max_length: int = 30
     url_display_max_length: int = 45
-    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
     rate_limit_seconds: int = 5
     max_audio_file_size_mb: int = 24
     audio_chunk_size_mb: int = 20  # Target size for audio chunks when splitting
@@ -143,6 +150,8 @@ class Config:
     qa_max_context_chars: int = int(os.getenv("QA_MAX_CONTEXT_CHARS", "15000"))  # Max context length
     qa_min_question_length: int = 5  # Minimum question length
     qa_max_question_length: int = 500  # Maximum question length
+    telemetry_trash_warning_mb: int = int(os.getenv("TELEMETRY_TRASH_WARNING_MB", "500"))
+    telemetry_failure_threshold: int = int(os.getenv("TELEMETRY_FAILURE_THRESHOLD", "3"))
     
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -150,6 +159,18 @@ class Config:
             raise ValueError(f"Invalid audio quality: {self.audio_quality}. Must be between 32-320 kbps")
         if self.max_audio_file_size_mb > 25:
             raise ValueError(f"Max file size cannot exceed 25MB (Whisper API limit)")
+
+        missing_openai_key = not os.getenv("OPENAI_API_KEY")
+        running_under_pytest = bool(os.getenv("PYTEST_CURRENT_TEST"))
+        running_in_ci = os.getenv("CI") not in (None, "", "0", "false", "False")
+
+        if missing_openai_key:
+            logger.warning("OPENAI_API_KEY is not set; the app will not contact OpenAI until it is configured.")
+
+        if missing_openai_key and not (running_under_pytest or running_in_ci):
+            raise ValueError(
+                "Missing required configuration: OPENAI_API_KEY must be set in your .env file before starting the app."
+            )
         
         # Set up paths based on data_root
         if self.output_dir is None:
@@ -169,7 +190,7 @@ class Config:
 config = Config()
 
 # Initialize database
-from database import DatabaseManager
+from database import DatabaseManager, ProjectNotFoundError
 db_manager = DatabaseManager(config.database_path)
 
 # Prompt templates
@@ -254,13 +275,122 @@ def sanitize_url_for_log(url: str, max_length: int = 50) -> str:
 
 
 def safe_filename(s: str) -> str:
-    """Convert string to safe filename by removing special characters."""
-    return re.sub(r'[^a-zA-Z0-9_\-]+', '_', s)
+    """Convert string to safe filename by replacing invalid chars with underscores."""
+    result_chars = []
+    punctuation_sequence = False
+
+    for ch in s:
+        if re.match(r"[a-zA-Z0-9_\-]", ch):
+            result_chars.append(ch)
+            punctuation_sequence = False
+        elif ch.isspace():
+            result_chars.append("_")
+            punctuation_sequence = False
+        else:
+            category = unicodedata.category(ch)
+            is_punctuation_or_symbol = category.startswith("P") or category.startswith("S")
+
+            if is_punctuation_or_symbol:
+                if not punctuation_sequence:
+                    result_chars.append("_")
+                    punctuation_sequence = True
+            else:
+                result_chars.append("_")
+                punctuation_sequence = False
+
+    return "".join(result_chars)
+
+
+def validate_and_sanitize_path(path_component: str, base_dir: Path, allow_absolute: bool = False) -> Tuple[bool, Optional[Path], str]:
+    """
+    Validate and sanitize a path component to prevent directory traversal attacks.
+    
+    Ensures the resulting path:
+    - Stays within the base directory
+    - Doesn't contain traversal patterns (.., /, \\)
+    - Resolves to a path that's actually within base_dir (prevents symlink attacks)
+    - Uses only safe characters
+    
+    Args:
+        path_component: Path component to validate (e.g., project directory name)
+        base_dir: Base directory that the path must stay within
+        allow_absolute: If False, rejects absolute paths
+        
+    Returns:
+        Tuple of (is_valid: bool, sanitized_path: Optional[Path], error_message: str)
+        If valid, sanitized_path is the safe Path object, error_message is empty
+    """
+    if not path_component or not isinstance(path_component, str):
+        return False, None, "Path component is empty or invalid"
+    
+    # Reject empty strings or whitespace-only
+    if not path_component.strip():
+        return False, None, "Path component cannot be empty"
+    
+    # Check for directory traversal patterns
+    traversal_patterns = ['..', '/', '\\']
+    for pattern in traversal_patterns:
+        if pattern in path_component:
+            logger.warning(f"Rejected path with traversal pattern '{pattern}': {sanitize_url_for_log(path_component)}")
+            return False, None, f"Path contains forbidden pattern: {pattern}"
+    
+    # Check for null bytes
+    if '\x00' in path_component:
+        logger.warning(f"Rejected path with null byte: {sanitize_url_for_log(path_component)}")
+        return False, None, "Path contains null byte"
+    
+    # Reject absolute paths if not allowed
+    if not allow_absolute:
+        # Check for absolute path indicators
+        if path_component.startswith('/') or (len(path_component) > 1 and path_component[1] == ':'):
+            logger.warning(f"Rejected absolute path: {sanitize_url_for_log(path_component)}")
+            return False, None, "Absolute paths are not allowed"
+    
+    # Sanitize the path component
+    sanitized_component = safe_filename(path_component)
+    if not sanitized_component:
+        return False, None, "Path component became empty after sanitization"
+    
+    # Construct the full path
+    try:
+        full_path = base_dir / sanitized_component
+        
+        # Resolve to absolute path to check for symlink attacks
+        # This ensures we're actually within base_dir even if there are symlinks
+        resolved_path = full_path.resolve()
+        resolved_base = base_dir.resolve()
+        
+        # Ensure resolved path is actually within base directory
+        try:
+            # Use relative_to to check if path is within base
+            resolved_path.relative_to(resolved_base)
+        except ValueError:
+            # Path is outside base directory (possible symlink attack)
+            logger.warning(f"Rejected path outside base directory: {sanitize_url_for_log(path_component)} "
+                         f"(resolved to {resolved_path}, base is {resolved_base})")
+            return False, None, "Path resolves outside allowed directory"
+        
+        # Additional check: ensure parent is exactly base_dir (prevents ../ attacks)
+        if full_path.parent.resolve() != resolved_base:
+            logger.warning(f"Rejected path with invalid parent: {sanitize_url_for_log(path_component)}")
+            return False, None, "Path has invalid parent directory"
+        
+        return True, full_path, ""
+        
+    except (OSError, ValueError) as e:
+        logger.error(f"Path validation error for {sanitize_url_for_log(path_component)}: {e}")
+        return False, None, f"Path validation failed: {e}"
 
 
 def validate_youtube_url(url: str) -> bool:
     """
-    Validate that URL is from YouTube or YouTube Shorts.
+    Validate that URL is from YouTube or YouTube Shorts with enhanced security checks.
+    
+    Performs strict validation including:
+    - Domain whitelist check
+    - Protocol validation (http/https only)
+    - Video ID format validation (11 alphanumeric characters)
+    - Rejection of suspicious parameters and schemes
     
     Args:
         url: URL string to validate
@@ -268,10 +398,53 @@ def validate_youtube_url(url: str) -> bool:
     Returns:
         True if valid YouTube URL, False otherwise
     """
+    if url is None or not isinstance(url, str) or not url.strip():
+        return False
+    
+    # Reject suspicious schemes immediately
+    url_lower = url.lower().strip()
+    suspicious_schemes = ['javascript:', 'data:', 'vbscript:', 'file:', 'about:']
+    if any(url_lower.startswith(scheme) for scheme in suspicious_schemes):
+        logger.warning(f"Rejected suspicious URL scheme: {sanitize_url_for_log(url)}")
+        return False
+    
     try:
         parsed = urlparse(url)
-        return parsed.netloc in VALID_YOUTUBE_DOMAINS
-    except (ValueError, TypeError) as e:
+        
+        # Must have valid domain
+        if parsed.netloc not in VALID_YOUTUBE_DOMAINS:
+            return False
+        
+        # Must use http or https protocol
+        if parsed.scheme not in ('http', 'https'):
+            logger.warning(f"Rejected non-HTTP(S) protocol: {sanitize_url_for_log(url)}")
+            return False
+        
+        # Extract and validate video ID
+        video_id = extract_video_id(url)
+        
+        # Video ID must be present and valid format
+        if not video_id:
+            logger.warning(f"No video ID found in URL: {sanitize_url_for_log(url)}")
+            return False
+        
+        # YouTube video IDs are exactly 11 alphanumeric characters
+        # Allow hyphens and underscores for edge cases
+        if len(video_id) != 11 or not all(c.isalnum() or c in ('-', '_') for c in video_id):
+            logger.warning(f"Invalid video ID format: {sanitize_url_for_log(video_id)}")
+            return False
+        
+        # Additional security: check for suspicious query parameters
+        if parsed.query:
+            suspicious_params = ['javascript', 'onclick', 'onerror', 'eval', 'script']
+            query_lower = parsed.query.lower()
+            if any(param in query_lower for param in suspicious_params):
+                logger.warning(f"Rejected URL with suspicious parameters: {sanitize_url_for_log(url)}")
+                return False
+        
+        return True
+        
+    except (ValueError, TypeError, AttributeError) as e:
         logger.warning(f"Failed to parse URL: {sanitize_url_for_log(url)}, error: {e}")
         return False
 
@@ -321,9 +494,148 @@ def safe_write_text(path: Path, content: str, encoding: str = "utf-8") -> bool:
         return False
 
 
+T = TypeVar("T")
+
+
+def _run_with_backoff(
+    operation_name: str,
+    func: Callable[[], T],
+    *,
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
+    backoff_factor: float = 2.0,
+    jitter: float = 0.3,
+    retry_exceptions: Tuple[type, ...] = (Exception,),
+    context: Optional[str] = None
+) -> T:
+    """
+    Execute `func` with exponential backoff and jitter.
+    Logs retry attempts and surfaces the final exception if all retries fail.
+    """
+    attempt = 0
+    delay = initial_delay
+    start_time = time.perf_counter()
+    context_info = f" [{context}]" if context else ""
+
+    while True:
+        attempt += 1
+        try:
+            result = func()
+            elapsed = time.perf_counter() - start_time
+            logger.info(f"{operation_name}{context_info} succeeded on attempt {attempt} in {elapsed:.2f}s")
+            return result
+        except retry_exceptions as exc:
+            if attempt >= max_retries:
+                logger.error(f"{operation_name}{context_info} failed after {attempt} attempts: {exc}")
+                raise
+
+            sleep_time = delay + random.uniform(0, jitter)
+            logger.warning(
+                f"{operation_name}{context_info} attempt {attempt} failed: {exc}. Retrying in {sleep_time:.1f}s."
+            )
+            time.sleep(sleep_time)
+            delay *= backoff_factor
+
+
 # Q&A functionality moved to qa_service.py for better modularity
 # Import it here for backward compatibility
 from qa_service import answer_question_from_transcript as _qa_function
+
+
+def sanitize_chat_question(question: str) -> str:
+    """
+    Sanitize chat question input for security.
+    
+    Performs:
+    - HTML/script tag stripping
+    - Control character removal (except newline, tab, carriage return)
+    - Unicode normalization
+    - Excessive whitespace cleanup
+    - Basic XSS prevention
+    
+    Args:
+        question: Raw question input from user
+        
+    Returns:
+        Sanitized question string safe for processing
+    """
+    if not question or not isinstance(question, str):
+        return ""
+    
+    # Remove HTML/XML tags (basic XSS prevention)
+    # This regex removes <...> tags but preserves content
+    question = re.sub(r'<[^>]+>', '', question)
+    
+    # Remove script-related patterns (case-insensitive)
+    script_patterns = [
+        r'javascript:',
+        r'on\w+\s*=',  # Event handlers like onclick=, onerror=
+        r'<script',
+        r'</script>',
+        r'eval\s*\(',
+        r'expression\s*\(',
+    ]
+    for pattern in script_patterns:
+        question = re.sub(pattern, '', question, flags=re.IGNORECASE)
+    
+    # Remove control characters except newline (\n), tab (\t), and carriage return (\r)
+    # Control characters are in range 0x00-0x1F except 0x09 (tab), 0x0A (newline), 0x0D (carriage return)
+    # Also remove DEL (0x7F) and other non-printable Unicode characters
+    sanitized_chars = []
+    for char in question:
+        code_point = ord(char)
+        # Allow printable ASCII (32-126), tab (9), newline (10), carriage return (13)
+        if (32 <= code_point <= 126) or code_point in (9, 10, 13):
+            sanitized_chars.append(char)
+        # Allow common Unicode characters (letters, numbers, punctuation, symbols)
+        elif unicodedata.category(char)[0] in ('L', 'N', 'P', 'S', 'Z'):
+            sanitized_chars.append(char)
+        # Remove everything else (control chars, private use, etc.)
+    
+    question = ''.join(sanitized_chars)
+    
+    # Unicode normalization (prevent homograph attacks)
+    question = unicodedata.normalize('NFKC', question)
+    
+    # Clean up excessive whitespace (multiple spaces, newlines)
+    # Preserve tabs and single newlines, but clean up excessive spaces
+    question = re.sub(r' +', ' ', question)  # Multiple spaces -> single space
+    question = re.sub(r'\n{3,}', '\n\n', question)  # More than 2 newlines -> 2 newlines
+    question = question.strip()
+    
+    return question
+
+
+def check_chat_rate_limit(project_key: str, min_seconds: int = 2) -> Tuple[bool, Optional[float]]:
+    """
+    Check if chat question can be submitted based on rate limiting.
+    
+    Args:
+        project_key: Unique key for the project/chat session
+        min_seconds: Minimum seconds between chat submissions
+        
+    Returns:
+        Tuple of (is_allowed: bool, wait_time: Optional[float])
+        If not allowed, wait_time is the seconds to wait
+    """
+    rate_limit_key = f"chat_rate_limit_{project_key}"
+    current_time = time.time()
+    
+    if rate_limit_key not in st.session_state:
+        st.session_state[rate_limit_key] = current_time
+        return True, None
+    
+    last_chat_time = st.session_state[rate_limit_key]
+    time_since_last = current_time - last_chat_time
+    
+    if time_since_last < min_seconds:
+        wait_time = min_seconds - time_since_last
+        return False, wait_time
+    
+    # Update last chat time
+    st.session_state[rate_limit_key] = current_time
+    return True, None
+
 
 def answer_question_from_transcript(question: str, transcript: str, title: str, 
                                     summary: str = "") -> str:
@@ -572,6 +884,116 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
         return file_bytes.decode('utf-8', errors='replace')
 
 
+# File signature (magic bytes) for supported formats
+FILE_SIGNATURES = {
+    'pdf': [b'%PDF'],
+    'docx': [b'PK\x03\x04', b'PK\x05\x06'],  # ZIP-based format (DOCX is a ZIP)
+    'txt': []  # Text files have no signature, validate by content
+}
+
+
+def validate_uploaded_file(uploaded_file: Any) -> Tuple[bool, str]:
+    """
+    Validate uploaded file with security checks.
+    
+    Performs:
+    - Filename sanitization
+    - File extension validation
+    - Content-type verification via magic bytes
+    - Basic malicious file detection
+    
+    Args:
+        uploaded_file: Streamlit uploaded file object
+        
+    Returns:
+        Tuple of (is_valid: bool, error_message: str)
+        If valid, error_message is empty string
+    """
+    if uploaded_file is None:
+        return False, "No file provided"
+    
+    # Get original filename and sanitize
+    original_name = uploaded_file.name if hasattr(uploaded_file, 'name') else 'unknown'
+    sanitized_name = safe_filename(original_name)
+    
+    # Check for suspicious filename patterns
+    suspicious_patterns = [
+        '..',  # Directory traversal
+        '/', '\\',  # Path separators
+        '\x00',  # Null bytes
+        '<', '>', '|', ':', '"', '*', '?',  # Windows forbidden chars
+    ]
+    
+    for pattern in suspicious_patterns:
+        if pattern in original_name:
+            logger.warning(f"Rejected file with suspicious pattern '{pattern}': {sanitize_url_for_log(original_name)}")
+            return False, f"Invalid filename: contains forbidden characters"
+    
+    # Validate file extension
+    file_name_lower = original_name.lower()
+    valid_extensions = ['.pdf', '.docx', '.txt']
+    file_ext = None
+    
+    for ext in valid_extensions:
+        if file_name_lower.endswith(ext):
+            file_ext = ext[1:]  # Remove the dot
+            break
+    
+    if not file_ext:
+        return False, f"Unsupported file type. Please use PDF, DOCX, or TXT files."
+    
+    # Read file bytes for signature verification
+    try:
+        # Save current position
+        current_pos = uploaded_file.tell() if hasattr(uploaded_file, 'tell') else 0
+        file_bytes = uploaded_file.read()
+        # Reset position for later processing
+        if hasattr(uploaded_file, 'seek'):
+            uploaded_file.seek(current_pos)
+    except Exception as e:
+        logger.error(f"Failed to read file for validation: {e}")
+        return False, "Unable to read file for validation"
+    
+    # Check for empty file first
+    if len(file_bytes) == 0:
+        return False, "File is empty"
+    
+    # Verify file signature (magic bytes)
+    if file_ext in FILE_SIGNATURES and FILE_SIGNATURES[file_ext]:
+        signatures = FILE_SIGNATURES[file_ext]
+        file_start = file_bytes[:min(10, len(file_bytes))]
+        
+        if not any(file_start.startswith(sig) for sig in signatures):
+            logger.warning(f"File signature mismatch for {sanitize_url_for_log(original_name)}: "
+                         f"expected {file_ext}, got {file_bytes[:4]}")
+            return False, (f"File content does not match declared type ({file_ext.upper()}). "
+                          f"The file may be corrupted or mislabeled.")
+    
+    # Additional validation for text files (check if it's actually text)
+    if file_ext == 'txt':
+        try:
+            # Try to decode as UTF-8 to verify it's text
+            sample = file_bytes[:1024]  # Check first 1KB
+            sample.decode('utf-8', errors='strict')
+        except UnicodeDecodeError:
+            # If strict decode fails, check if it's binary
+            # Text files should have mostly printable characters
+            printable_ratio = sum(1 for b in sample if 32 <= b <= 126 or b in (9, 10, 13)) / len(sample) if sample else 0
+            if printable_ratio < 0.7:  # Less than 70% printable = likely binary
+                return False, "File appears to be binary data, not text. Please ensure it's a valid text file."
+    
+    # Check for suspiciously large files (additional safety beyond size limit)
+    if len(file_bytes) == 0:
+        return False, "File is empty"
+    
+    # Check for embedded scripts in PDFs (basic check)
+    if file_ext == 'pdf' and b'<script' in file_bytes[:10000].lower():
+        logger.warning(f"Rejected PDF with potential embedded script: {sanitize_url_for_log(original_name)}")
+        return False, "File contains potentially unsafe content"
+    
+    return True, ""
+
+
 def extract_text_from_document(uploaded_file: Any) -> str:
     """
     Extract text from various document formats.
@@ -651,9 +1073,20 @@ def download_audio(url: str, session_dir: Path) -> Tuple[Path, Dict[str, Any]]:
         'no_warnings': True,
     }
 
-    try:
+    def _download_attempt():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            return ydl.extract_info(url, download=True)
+
+    try:
+        info = _run_with_backoff(
+            "YouTube download",
+            _download_attempt,
+            max_retries=3,
+            initial_delay=1.0,
+            backoff_factor=2.0,
+            jitter=0.5,
+            context=url
+        )
     except Exception as e:
         error_msg = str(e).lower()
         if 'private' in error_msg or 'unavailable' in error_msg:
@@ -815,57 +1248,51 @@ def _transcribe_single_file(audio_path: Path) -> Any:
         raise ValueError("OpenAI client is not initialized. Check OPENAI_API_KEY.")
     
     logger.info(f"Transcribing {audio_path.name}, size: {audio_path.stat().st_size / (1024*1024):.2f} MB")
-    
-    max_retries = 3
-    retry_delay = 2  # seconds
-    
-    for attempt in range(max_retries):
-        try:
-            with open(audio_path, "rb") as audio_file:
-                result = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    response_format="verbose_json",
-                    timestamp_granularities=["segment"],
-                    timeout=config.api_timeout_seconds
-                )
-            logger.info(f"Transcription completed: {audio_path.name}")
-            return result
-        except Exception as e:
-            error_str = str(e).lower()
-            
-            # Check for specific error types
-            if '413' in str(e) or 'payload too large' in error_str or 'file size' in error_str:
-                raise FileSizeError(
-                    f"Audio file too large for Whisper API (limit: {config.max_audio_file_size_mb}MB). "
-                    f"Try a shorter video or reduce audio quality."
-                ) from e
-            
-            if 'rate_limit' in error_str or 'quota' in error_str or '429' in str(e):
-                raise APIQuotaError(
-                    "OpenAI API rate limit or quota exceeded. "
-                    "Check your usage at https://platform.openai.com/usage"
-                ) from e
-            
-            if 'connection' in error_str or 'timeout' in error_str or 'network' in error_str:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Connection error, retrying... (attempt {attempt + 1}/{max_retries})")
-                    time.sleep(retry_delay * (attempt + 1))
-                    continue
-                else:
-                    raise APIConnectionError(
-                        "Could not connect to OpenAI API. Check your internet connection."
-                    ) from e
-            
-            # Generic retry for other errors
-            logger.warning(f"Transcription attempt {attempt + 1}/{max_retries} failed: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
-            else:
-                logger.error(f"Transcription failed after {max_retries} attempts")
-                raise TranscriptionError(
-                    f"Transcription failed after {max_retries} attempts: {str(e)}"
-                ) from e
+
+    def _whisper_api_call():
+        with open(audio_path, "rb") as audio_file:
+            return client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="verbose_json",
+                timestamp_granularities=["segment"],
+                timeout=config.api_timeout_seconds
+            )
+
+    try:
+        result = _run_with_backoff(
+            "Whisper-1 transcription",
+            _whisper_api_call,
+            max_retries=3,
+            initial_delay=2.0,
+            backoff_factor=2.0,
+            jitter=0.6,
+            context=audio_path.name
+        )
+        return result
+    except Exception as e:
+        error_str = str(e).lower()
+        
+        if '413' in error_str or 'payload too large' in error_str or 'file size' in error_str:
+            raise FileSizeError(
+                f"Audio file too large for Whisper API (limit: {config.max_audio_file_size_mb}MB). "
+                f"Try a shorter video or reduce audio quality."
+            ) from e
+
+        if 'rate_limit' in error_str or 'quota' in error_str or '429' in error_str:
+            raise APIQuotaError(
+                "OpenAI API rate limit or quota exceeded. "
+                "Check your usage at https://platform.openai.com/usage"
+            ) from e
+
+        if 'connection' in error_str or 'timeout' in error_str or 'network' in error_str:
+            raise APIConnectionError(
+                "Could not connect to OpenAI API. Check your internet connection."
+            ) from e
+
+        raise TranscriptionError(
+            f"Transcription failed after multiple retries: {str(e)}"
+        ) from e
 
 
 def transcribe_audio_with_timestamps(audio_path: Path, progress_callback: Optional[callable] = None) -> Any:
@@ -1018,11 +1445,22 @@ def transcribe_audio_with_local_gpu(audio_path: Path, progress_callback: Optiona
         logger.info(f"Transcribing {audio_path.name} with local GPU")
         
         # Transcribe
-        segments_iter, info = _gpu_model_cache.transcribe(
-            str(audio_path),
-            language="en",
-            beam_size=5,
-            word_timestamps=False
+        def _gpu_transcription():
+            return _gpu_model_cache.transcribe(
+                str(audio_path),
+                language="en",
+                beam_size=5,
+                word_timestamps=False
+            )
+
+        segments_iter, info = _run_with_backoff(
+            "Local GPU transcription",
+            _gpu_transcription,
+            max_retries=2,
+            initial_delay=0.5,
+            backoff_factor=2.0,
+            jitter=0.3,
+            context=audio_path.name
         )
         
         # Collect segments and build text
@@ -1097,46 +1535,53 @@ def call_openai_with_retry(messages: List[Dict[str, str]], max_tokens: int, max_
     """
     if client is None:
         raise ValueError("OpenAI client is not initialized. Check OPENAI_API_KEY.")
-    
-    retry_delay = 2  # seconds
-    
-    for attempt in range(max_retries):
-        try:
-            response = client.chat.completions.create(
-                model=config.openai_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                timeout=config.api_timeout_seconds
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            error_str = str(e).lower()
-            
-            # Check for quota/rate limit errors
-            if 'rate_limit' in error_str or 'quota' in error_str or '429' in str(e):
-                raise APIQuotaError(
-                    "OpenAI API rate limit or quota exceeded. "
-                    "Check your usage at https://platform.openai.com/usage"
-                ) from e
-            
-            # Check for connection errors
-            if 'connection' in error_str or 'timeout' in error_str or 'network' in error_str:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Connection error, retrying... (attempt {attempt + 1}/{max_retries})")
-                    time.sleep(retry_delay * (attempt + 1))
-                    continue
-                else:
-                    raise APIConnectionError(
-                        "Could not connect to OpenAI API. Check your internet connection."
-                    ) from e
-            
-            # Retry for other errors
-            logger.warning(f"OpenAI API call attempt {attempt + 1}/{max_retries} failed: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
-            else:
-                logger.error(f"OpenAI API call failed after {max_retries} attempts")
-                raise
+
+    def _chat_call():
+        return client.chat.completions.create(
+            model=config.openai_model,
+            messages=messages,
+            max_tokens=max_tokens,
+            timeout=config.api_timeout_seconds
+        )
+
+    try:
+        response = _run_with_backoff(
+            "OpenAI chat completion",
+            _chat_call,
+            max_retries=max_retries,
+            initial_delay=1.0,
+            backoff_factor=2.0,
+            jitter=0.4,
+            context=f"model={config.openai_model}"
+        )
+    except Exception as e:
+        error_str = str(e).lower()
+
+        if 'rate_limit' in error_str or 'quota' in error_str or '429' in error_str:
+            raise APIQuotaError(
+                "OpenAI API rate limit or quota exceeded. "
+                "Check your usage at https://platform.openai.com/usage"
+            ) from e
+
+        if 'connection' in error_str or 'timeout' in error_str or 'network' in error_str:
+            raise APIConnectionError(
+                "Could not connect to OpenAI API. Check your internet connection."
+            ) from e
+
+        raise
+
+    usage = getattr(response, "usage", None)
+    tokens_used = None
+    if usage:
+        tokens_used = getattr(usage, "total_tokens", None)
+        if tokens_used is None and isinstance(usage, dict):
+            tokens_used = usage.get("total_tokens")
+
+    logger.info(
+        f"OpenAI chat completion tokens={tokens_used or 'unknown'}, model={config.openai_model}"
+    )
+
+    return response.choices[0].message.content
 
 
 def validate_and_truncate_text(text: str, max_length: Optional[int] = None) -> str:
@@ -1712,34 +2157,222 @@ def list_projects() -> List[Dict[str, Any]]:
     return projects
 
 
-def delete_project(project_dir_name: str) -> bool:
+@dataclass
+class DeletionResult:
+    project_dir: str
+    success: bool = False
+    disk_removed: bool = False
+    db_deleted: bool = False
+    message: str = ""
+    trash_path: Optional[Path] = None
+    project_id: Optional[int] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+def _safe_read_text_file(path: Path) -> str:
+    try:
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed to read {path}: {e}")
+    return ""
+
+
+def _read_project_metadata(project_path: Path) -> Dict[str, Any]:
+    metadata_file = project_path / "metadata.json"
+    if metadata_file.exists():
+        try:
+            return json.loads(metadata_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"Failed to parse metadata for {project_path.name}: {e}")
+    return {}
+
+
+def _create_trash_destination(project_dir_name: str) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    trash_dir = config.data_root / "trash"
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    return trash_dir / f"{project_dir_name}_{timestamp}"
+
+
+def _append_deletion_log(entry: Dict[str, Any]) -> None:
+    log_dir = config.data_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "deletions.log"
+    entry['timestamp'] = datetime.now().isoformat()
+    with log_file.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def delete_project(project_dir_name: str) -> DeletionResult:
     """
-    Delete a project directory and all its contents.
+    Delete a project directory, remove its database entry, and log the action.
     
     Args:
         project_dir_name: Name of project directory to delete
         
     Returns:
-        True if deletion succeeded, False otherwise
+        DeletionResult describing the outcome.
     """
-    # Validate directory name doesn't contain path traversal attempts
-    if '/' in project_dir_name or '\\' in project_dir_name or '..' in project_dir_name:
-        logger.warning(f"Invalid project directory name: {project_dir_name}")
-        return False
+    result = DeletionResult(project_dir=project_dir_name)
+
+    # Validate and sanitize directory name to prevent path traversal
+    is_valid, project_path, error_msg = validate_and_sanitize_path(
+        project_dir_name,
+        config.output_dir,
+        allow_absolute=False
+    )
     
-    project_path = config.output_dir / project_dir_name
-    if project_path.exists() and project_path.parent == config.output_dir:
+    if not is_valid:
+        result.message = error_msg or "Invalid directory name."
+        logger.warning(f"Invalid project directory name: {project_dir_name} - {error_msg}")
+        _append_deletion_log({
+            "action": "delete",
+            "project_dir": project_dir_name,
+            "message": result.message
+        })
+        return result
+    result.metadata = _read_project_metadata(project_path)
+
+    project = None
+    try:
+        project = db_manager.get_project_by_dir(project_dir_name)
+    except Exception as e:
+        logger.warning(f"Unable to locate project {project_dir_name} in database: {e}")
+
+    if project:
+        result.project_id = project.id
+
+    message_parts = []
+
+    # Move files to trash for safe cleanup
+    # Additional safety check: ensure path is still within output_dir after resolution
+    if project_path.exists() and project_path.resolve().parent == config.output_dir.resolve():
         try:
-            shutil.rmtree(project_path)
-            logger.info(f"Deleted project: {project_dir_name}")
-            return True
-        except (PermissionError, OSError) as e:
-            logger.error(f"Failed to delete project {project_dir_name}: {e}")
-            return False
+            trash_path = _create_trash_destination(project_dir_name)
+            shutil.move(str(project_path), str(trash_path))
+            result.disk_removed = True
+            result.trash_path = trash_path
+            message_parts.append("Project files moved to trash.")
+            logger.info(f"Moved {project_dir_name} to trash at {trash_path}")
         except Exception as e:
-            logger.error(f"Unexpected error deleting project {project_dir_name}: {e}")
-            return False
-    return False
+            message_parts.append(f"Failed to move files: {str(e)}")
+            logger.error(f"Failed to move project {project_dir_name} to trash: {e}")
+    else:
+        message_parts.append("Project files not found.")
+
+    # Clean up database entry when available
+    if result.project_id is not None:
+        try:
+            db_manager.delete_project(result.project_id)
+            result.db_deleted = True
+            message_parts.append("Database entry removed.")
+        except Exception as e:
+            message_parts.append(f"Database cleanup failed: {e}")
+            logger.error(f"Failed to delete project {project_dir_name} from database: {e}")
+    else:
+        message_parts.append("No database entry to remove.")
+
+    result.success = result.disk_removed or result.db_deleted
+    result.message = " ".join(message_parts).strip()
+
+    _append_deletion_log({
+        "action": "delete",
+        "project_dir": project_dir_name,
+        "disk_removed": result.disk_removed,
+        "db_removed": result.db_deleted,
+        "trash_path": str(result.trash_path) if result.trash_path else None,
+        "message": result.message
+    })
+
+    return result
+
+
+def restore_project_from_trash(tombstone: Dict[str, Any]) -> Tuple[bool, str]:
+    trash_path_str = tombstone.get("trash_path") or ""
+    project_dir = tombstone.get("project_dir")
+
+    if not project_dir:
+        return False, "No project information found."
+
+    # Validate project directory name
+    is_valid, target_path, error_msg = validate_and_sanitize_path(
+        project_dir,
+        config.output_dir,
+        allow_absolute=False
+    )
+    
+    if not is_valid:
+        logger.warning(f"Invalid project directory in restore request: {project_dir} - {error_msg}")
+        return False, error_msg or "Invalid project directory name."
+
+    # Validate trash path
+    trash_path = Path(trash_path_str)
+    if not trash_path.exists():
+        return False, "Trash entry is missing."
+    
+    # Ensure trash path is within trash directory
+    trash_dir = config.data_root / "trash"
+    try:
+        trash_path.resolve().relative_to(trash_dir.resolve())
+    except ValueError:
+        logger.warning(f"Trash path outside trash directory: {trash_path}")
+        return False, "Invalid trash path location."
+    if target_path.exists():
+        return False, f"Project {project_dir} already exists."
+
+    try:
+        shutil.move(str(trash_path), str(target_path))
+    except Exception as e:
+        logger.error(f"Failed to move {project_dir} out of trash: {e}")
+        return False, f"Failed to move files back: {e}"
+
+    metadata = _read_project_metadata(target_path)
+    project_type = "youtube" if metadata.get("url") else "document"
+    title = metadata.get("title") or metadata.get("content_title") or project_dir
+    content_title = metadata.get("content_title") or metadata.get("transcript_title") or ""
+    source = metadata.get("url") or metadata.get("filename") or ""
+    created_at = metadata.get("created_at") or metadata.get("timestamp") or datetime.now().isoformat()
+    word_count = int(metadata.get("word_count", 0) or 0)
+    segment_count = int(metadata.get("segment_count", 0) or 0)
+    notes = metadata.get("notes", "")
+    tags = metadata.get("tags") if isinstance(metadata.get("tags"), list) else []
+
+    transcript_text = _safe_read_text_file(target_path / "transcript.txt")
+    summary_text = _safe_read_text_file(target_path / "summary.txt")
+    key_factors_text = _safe_read_text_file(target_path / "key_factors.txt")
+
+    try:
+        from database import Project
+        project = Project(
+            type=project_type,
+            title=title,
+            content_title=content_title,
+            source=source,
+            created_at=created_at,
+            word_count=word_count,
+            segment_count=segment_count,
+            project_dir=project_dir,
+            notes=notes,
+            tags=tags
+        )
+        db_manager.insert_project(project, transcript=transcript_text, summary=summary_text, key_factors=key_factors_text)
+    except Exception as e:
+        logger.error(f"Failed to restore database entry for {project_dir}: {e}")
+        try:
+            trash_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(target_path), str(trash_path))
+        except Exception as move_back_err:
+            logger.error(f"Failed to move {project_dir} back to trash after DB failure: {move_back_err}")
+        return False, f"Failed to restore project in database: {e}"
+
+    _append_deletion_log({
+        "action": "restore",
+        "project_dir": project_dir,
+        "message": "Project restored from trash."
+    })
+
+    return True, "Project restored successfully."
 
 
 def update_project_metadata_with_title(project_dir_name: str) -> bool:
@@ -1752,7 +2385,16 @@ def update_project_metadata_with_title(project_dir_name: str) -> bool:
     Returns:
         True if update succeeded, False otherwise
     """
-    project_path = config.output_dir / project_dir_name
+    # Validate and sanitize directory name
+    is_valid, project_path, error_msg = validate_and_sanitize_path(
+        project_dir_name,
+        config.output_dir,
+        allow_absolute=False
+    )
+    
+    if not is_valid:
+        logger.warning(f"Invalid project directory name for update: {project_dir_name} - {error_msg}")
+        return False
     metadata_file = project_path / "metadata.json"
     
     if not metadata_file.exists():
@@ -1920,25 +2562,13 @@ if old_outputs_dir.exists() and old_outputs_dir != config.output_dir:
 # -----------------------------
 # PAGE NAVIGATION
 # -----------------------------
-if 'current_page' not in st.session_state:
-    st.session_state.current_page = "Process"
-
 # -----------------------------
 # SIDEBAR: NAVIGATION & PROJECT HISTORY
 # -----------------------------
 with st.sidebar:
     st.header("🧭 Navigation")
     
-    page = st.radio(
-        "Select Page",
-        options=["Process", "Database Explorer"],
-        index=0 if st.session_state.current_page == "Process" else 1,
-        label_visibility="collapsed"
-    )
-    
-    if page != st.session_state.current_page:
-        st.session_state.current_page = page
-        st.rerun()
+    st.markdown("Choose a project to review or run a transcript chat.")
     
     # Help button
     if st.button("❓ Help & User Guide", use_container_width=True, help="View complete user guide"):
@@ -1949,22 +2579,19 @@ with st.sidebar:
     
     # Quick search in sidebar
     search_query = st.text_input("🔍 Quick search", placeholder="Search projects...", key="sidebar_search")
-    
-    # Get projects from database
+
+    projects = []
     try:
         if search_query:
             db_projects = db_manager.list_projects(search_query=search_query, limit=20)
         else:
             db_projects = db_manager.list_projects(limit=20, order_by="created_at", order_desc=True)
-        
-        # Convert to dict format for compatibility
-        projects = []
+
         for p in db_projects:
-            # Ensure source is a string
             source = str(p.source) if p.source else ''
-            
             proj_dict = {
                 'project_dir': p.project_dir,
+                'id': p.id,
                 'title': p.title or '',
                 'transcript_title': p.content_title if p.type == 'youtube' else None,
                 'content_title': p.content_title if p.type == 'document' else None,
@@ -1977,8 +2604,210 @@ with st.sidebar:
             projects.append(proj_dict)
     except Exception as e:
         logger.error(f"Failed to load projects from database: {e}")
-        # Fallback to file-based loading
         projects = list_projects()
+
+    sidebar_query_projects = [p for p in projects if p.get('id')]
+
+    def _sidebar_project_label(project: Dict[str, Any]) -> str:
+        base_title = (
+            project.get('transcript_title') or
+            project.get('content_title') or
+            project.get('title') or
+            project.get('project_dir') or
+            "Untitled"
+        )
+        icon = "🎥" if project.get('url') else "📄"
+        formatted = truncate_title(base_title, max_length=40)
+        return f"{icon} {formatted} ({safe_filename(project.get('project_dir', 'project'))})"
+
+    st.markdown("### Sidebar Transcript Query")
+    if sidebar_query_projects:
+        project_labels = {
+            proj['id']: _sidebar_project_label(proj)
+            for proj in sidebar_query_projects
+        }
+        selected_project_id = st.selectbox(
+            "Select project for transcript query",
+            options=list(project_labels.keys()),
+            format_func=lambda pid: project_labels.get(pid, "Unknown Project"),
+            key="sidebar_transcript_project_select"
+        )
+        selected_project = next(
+            (proj for proj in sidebar_query_projects if proj['id'] == selected_project_id),
+            None
+        )
+
+        project_content: Dict[str, Any] = {}
+        content_error = ""
+        if selected_project:
+            try:
+                project_content = db_manager.get_project_content(selected_project_id)
+            except ProjectNotFoundError:
+                content_error = "Project data missing in the database. Please reprocess it."
+            except Exception as exc:
+                logger.warning(f"Unable to load sidebar transcript content: {exc}")
+                content_error = "Unable to load project content right now."
+
+        context_parts = [
+            (project_content.get('transcript') or "").strip(),
+            (project_content.get('summary') or "").strip(),
+            (project_content.get('key_factors') or "").strip()
+        ]
+        transcript_context = " ".join(part for part in context_parts if part).strip()
+        summary_text = project_content.get('summary', '')
+
+        if content_error:
+            st.warning(content_error)
+        question_key = f"sidebar_transcript_question_{selected_project_id}"
+        response_key = f"sidebar_transcript_response_{selected_project_id}"
+        st.text_input(
+            "Ask a question about the selected project transcript:",
+            key=question_key,
+            placeholder="e.g., What are the key takeaways?",
+            label_visibility="collapsed"
+        )
+
+        button_disabled = not bool(transcript_context) or client is None
+        if client is None:
+            st.caption("OpenAI API key is required to generate answers.")
+
+        if st.button(
+            "💬 Run transcript query",
+            key=f"sidebar_transcript_btn_{selected_project_id}",
+            disabled=button_disabled
+        ):
+            raw_question = st.session_state.get(question_key, "")
+            sanitized_question = sanitize_chat_question(raw_question)
+            
+            # Check rate limiting
+            rate_limit_key = f"sidebar_chat_{selected_project_id}"
+            is_allowed, wait_time = check_chat_rate_limit(rate_limit_key, min_seconds=2)
+            if not is_allowed:
+                st.warning(f"⏳ Please wait {wait_time:.1f} more seconds before asking another question.")
+            elif client is None:
+                st.error("OpenAI API key is not configured; enable it in .env.")
+                record_sidebar_operation(
+                    "Transcript Chat",
+                    "failed",
+                    message="Missing OpenAI API key.",
+                    project_dir=selected_project.get('project_dir') if selected_project else None
+                )
+            elif len(sanitized_question) < config.qa_min_question_length:
+                st.warning(f"Please enter at least {config.qa_min_question_length} characters.")
+            elif len(sanitized_question) > config.qa_max_question_length:
+                st.warning(f"Please limit questions to {config.qa_max_question_length} characters.")
+            elif not transcript_context:
+                st.warning("Transcript content is not ready yet. Process the project first.")
+            else:
+                project_title = (
+                    selected_project.get('transcript_title') or
+                    selected_project.get('content_title') or
+                    selected_project.get('title') or
+                    selected_project.get('project_dir') or
+                    "Project"
+                )
+                try:
+                    with st.spinner("Generating answer..."):
+                        answer, tokens_used, cached = answer_question_from_transcript(
+                            sanitized_question,
+                            transcript_context,
+                            project_title,
+                            summary=summary_text
+                        )
+                    st.session_state[response_key] = {
+                        "answer": answer,
+                        "tokens": tokens_used,
+                        "cached": cached,
+                        "question": sanitized_question,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    record_sidebar_operation(
+                        "Transcript Chat",
+                        "success",
+                        message=f"{sanitized_question[:70]}",
+                        project_dir=selected_project.get('project_dir')
+                    )
+                except Exception as exc:
+                    logger.exception("Sidebar transcript chat failed", exc_info=exc)
+                    st.error("Unable to generate an answer right now. Please try again.")
+                    record_sidebar_operation(
+                        "Transcript Chat",
+                        "failed",
+                        message=str(exc),
+                        project_dir=selected_project.get('project_dir')
+                    )
+
+        response = st.session_state.get(response_key)
+        if response:
+            st.markdown("**Latest answer**")
+            st.write(response.get("answer"))
+            meta_parts = []
+            if response.get("tokens") is not None:
+                meta_parts.append(f"Tokens used: {response['tokens']}")
+            if response.get("cached"):
+                meta_parts.append("From cache")
+            if response.get("timestamp"):
+                meta_parts.append(f"Answered: {response['timestamp']}")
+            if meta_parts:
+                st.caption(" · ".join(meta_parts))
+    else:
+        st.info("Process a project to enable sidebar transcript queries.")
+
+    if "recent_operations" not in st.session_state:
+        st.session_state["recent_operations"] = []
+
+    if st.session_state["recent_operations"]:
+        st.caption("📝 Recent Operations")
+        for entry in st.session_state["recent_operations"]:
+            entry_time = entry.get("timestamp", "")
+            try:
+                parsed_time = datetime.fromisoformat(entry_time)
+                time_label = parsed_time.strftime("%b %d %I:%M %p")
+            except Exception:
+                time_label = entry_time
+
+            status = entry.get("status", "info").capitalize()
+            op_name = entry.get("operation", "Operation")
+            project_info = entry.get("project_dir") or ""
+            message = entry.get("message", "")
+            metadata = f"({project_info})" if project_info else ""
+            st.markdown(f"**{time_label}** · {op_name} · {status} {metadata}<br>{message}", unsafe_allow_html=True)
+
+    alerts = evaluate_health_alerts(
+        config.data_root,
+        st.session_state["recent_operations"],
+        trash_limit_mb=config.telemetry_trash_warning_mb,
+        failure_threshold=config.telemetry_failure_threshold
+    )
+
+    for alert in alerts:
+        st.warning(alert)
+
+    deleted_project = st.session_state.get("last_deleted_project")
+    if deleted_project:
+        title = deleted_project.get("title") or deleted_project.get("project_dir")
+        deleted_at = deleted_project.get("deleted_at", "Unknown time")
+        st.info(f"🗑️ {title} deleted at {deleted_at}")
+        if st.button("↩️ Undo last delete", key="undo_last_delete"):
+            restored, restore_message = restore_project_from_trash(deleted_project)
+            if restored:
+                st.success(restore_message)
+                record_sidebar_operation(
+                    "Restore Project",
+                    "success",
+                    message=restore_message,
+                    project_dir=deleted_project.get("project_dir")
+                )
+                st.session_state.pop("last_deleted_project", None)
+                st.rerun()
+            else:
+                st.error(restore_message)
+                record_sidebar_operation(
+                    "Restore Project",
+                    "failed",
+                    message=restore_message,
+                    project_dir=deleted_project.get("project_dir")
+                )
     
     if projects:
         st.write(f"**Total projects:** {len(projects)}")
@@ -2073,6 +2902,132 @@ with st.sidebar:
                 
                 st.write(f"**Words:** {proj.get('word_count', 'N/A'):,}")
                 
+                project_content = {'transcript': '', 'summary': '', 'key_factors': ''}
+                transcript_text = ""
+                project_summary = ""
+                key_factors_text = ""
+                project_dir_safe = safe_filename(proj.get('project_dir') or f"project_{idx}")
+                if proj.get('id'):
+                    try:
+                        project_content = db_manager.get_project_content(proj['id'])
+                    except ProjectNotFoundError:
+                        st.warning("Project record missing; transcript chat unavailable.")
+                    except Exception as exc:
+                        logger.error(f"Failed to load content for {proj.get('project_dir')}: {exc}")
+                        st.warning("Unable to load transcript content for this project.")
+                project_summary = project_content.get('summary', '') or ''
+                key_factors_text = project_content.get('key_factors', '') or ''
+                transcript_text = project_content.get('transcript', '') or ''
+
+                if project_summary:
+                    st.markdown("**Summary**")
+                    st.text_area(
+                        f"Summary for {project_name}",
+                        value=project_summary,
+                        height=120,
+                        key=f"summary_{project_dir_safe}_readonly",
+                        label_visibility="collapsed",
+                        disabled=True
+                    )
+                else:
+                    st.info("Summary not available for this project yet.")
+
+                if key_factors_text:
+                    st.markdown("**Key Factors**")
+                    st.text_area(
+                        f"Key factors for {project_name}",
+                        value=key_factors_text,
+                        height=140,
+                        key=f"key_factors_{project_dir_safe}_readonly",
+                        label_visibility="collapsed",
+                        disabled=True
+                    )
+                else:
+                    st.info("Key factors not available for this project yet.")
+
+                project_chat_key = str(proj.get('id') or safe_filename(proj['project_dir']))
+                question_key = f"project_chat_question_{project_chat_key}"
+                response_key = f"project_chat_response_{project_chat_key}"
+                transcript_context = transcript_text.strip() or project_summary.strip() or key_factors_text.strip()
+                st.markdown("---")
+                st.write("**Chat with this transcript**")
+                if not transcript_context:
+                    st.warning("Transcript content is not ready yet. Please process the project fully first.")
+                question = st.text_input(
+                    "Ask a question about this project:",
+                    key=question_key,
+                    placeholder="e.g., What are the main takeaways?",
+                    help="Answers are generated by the transcript/summary/key factors.",
+                    label_visibility="collapsed"
+                )
+                button_disabled = not bool(transcript_context)
+                if st.button("💬 Run transcript chat", key=f"project_chat_btn_{project_chat_key}", disabled=button_disabled):
+                    raw_question = st.session_state.get(question_key, "")
+                    sanitized_question = sanitize_chat_question(raw_question)
+                    
+                    # Check rate limiting
+                    is_allowed, wait_time = check_chat_rate_limit(project_chat_key, min_seconds=2)
+                    if not is_allowed:
+                        st.warning(f"⏳ Please wait {wait_time:.1f} more seconds before asking another question.")
+                    elif len(sanitized_question) < config.qa_min_question_length:
+                        st.warning(f"Please enter at least {config.qa_min_question_length} characters.")
+                    elif len(sanitized_question) > config.qa_max_question_length:
+                        st.warning(f"Please limit questions to {config.qa_max_question_length} characters.")
+                    elif client is None:
+                        st.error("OpenAI API key is not configured; enable it in .env to use transcript chat.")
+                        record_sidebar_operation(
+                            "Transcript Chat",
+                            "failed",
+                            message="Missing OpenAI API key.",
+                            project_dir=proj.get('project_dir')
+                        )
+                    else:
+                        try:
+                            with st.spinner("Generating answer..."):
+                                answer, tokens_used, cached = answer_question_from_transcript(
+                                    sanitized_question,
+                                    transcript_context,
+                                    project_name or proj.get('title') or proj.get('project_dir'),
+                                    summary=project_summary
+                                )
+                            st.session_state[response_key] = {
+                                "answer": answer,
+                                "tokens": tokens_used,
+                                "cached": cached,
+                                "question": sanitized_question,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            record_sidebar_operation(
+                                "Transcript Chat",
+                                "success",
+                                message=f"{sanitized_question[:70]}",
+                                project_dir=proj.get('project_dir')
+                            )
+                        except Exception as exc:
+                            logger.exception("Transcript chat failed", exc_info=exc)
+                            st.error("Unable to generate an answer right now. Please try again.")
+                            record_sidebar_operation(
+                                "Transcript Chat",
+                                "failed",
+                                message=str(exc),
+                                project_dir=proj.get('project_dir')
+                            )
+
+                response = st.session_state.get(response_key)
+                if response:
+                    st.markdown("**Latest answer**")
+                    st.write(response.get("answer"))
+                    meta_parts = []
+                    if response.get("tokens") is not None:
+                        meta_parts.append(f"Tokens used: {response['tokens']}")
+                    if response.get("cached"):
+                        meta_parts.append("From cache")
+                    if response.get("timestamp"):
+                        meta_parts.append(f"Answered: {response['timestamp']}")
+                    if meta_parts:
+                        st.caption(" · ".join(meta_parts))
+                st.markdown("---")
+
                 # Delete button with confirmation
                 col1, col2 = st.columns([1, 1])
                 with col1:
@@ -2086,13 +3041,34 @@ with st.sidebar:
                             st.rerun()
                     else:
                         if st.button("✅ Confirm", key=f"conf_{delete_key}", type="primary", use_container_width=True):
-                            if delete_project(proj['project_dir']):
-                                st.success("Deleted!")
-                                st.session_state[delete_key] = False
-                                st.rerun()
+                            deletion_result = delete_project(proj['project_dir'])
+                            if deletion_result.success:
+                                st.success(deletion_result.message or "Deleted!")
+                                record_sidebar_operation(
+                                    "Delete Project",
+                                    "success",
+                                    message=deletion_result.message or "Deleted project.",
+                                    project_dir=proj['project_dir']
+                                )
+                                st.session_state["last_deleted_project"] = {
+                                    "project_dir": proj['project_dir'],
+                                    "title": deletion_result.metadata.get("title") or proj.get("title") or proj['project_dir'],
+                                    "trash_path": str(deletion_result.trash_path) if deletion_result.trash_path else "",
+                                    "deleted_at": datetime.now().isoformat(),
+                                    "message": deletion_result.message,
+                                    "disk_removed": deletion_result.disk_removed,
+                                    "db_removed": deletion_result.db_deleted
+                                }
                             else:
-                                st.error("Failed to delete")
-                                st.session_state[delete_key] = False
+                                st.error(deletion_result.message or "Failed to delete project.")
+                                record_sidebar_operation(
+                                    "Delete Project",
+                                    "failed",
+                                    message=deletion_result.message or "Delete project failed.",
+                                    project_dir=proj['project_dir']
+                                )
+                            st.session_state[delete_key] = False
+                            st.rerun()
                 
                 with col2:
                     if st.session_state.get(delete_key, False):
@@ -2111,9 +3087,15 @@ with st.sidebar:
             else:
                 deleted_count = 0
                 for proj in projects:
-                    if delete_project(proj['project_dir']):
+                    result = delete_project(proj['project_dir'])
+                    if result.success:
                         deleted_count += 1
                 st.success(f"Deleted {deleted_count} project(s)!")
+                record_sidebar_operation(
+                    "Delete All Projects",
+                    "success",
+                    message=f"Deleted {deleted_count} project(s)."
+                )
                 st.session_state[confirm_all_key] = False
                 st.rerun()
     else:
@@ -2158,12 +3140,6 @@ if st.session_state.show_help:
 # -----------------------------
 # PAGE ROUTING
 # -----------------------------
-if st.session_state.current_page == "Database Explorer":
-    # Show database explorer UI
-    from ui_database_explorer import render_database_explorer
-    render_database_explorer(db_manager, config.output_dir)
-    st.stop()
-
 # Otherwise, show the main processing interface
 # Mode selector
 mode = st.radio("Select input type:", ["YouTube Video", "Document File"], horizontal=True)
@@ -2200,6 +3176,12 @@ if mode == "YouTube Video":
         if not url.strip():
             st.error("Please enter a valid YouTube URL.")
             st.stop()
+        
+        record_sidebar_operation(
+            "Process Video",
+            "started",
+            message=f"URL: {sanitize_url_for_log(url)}"
+        )
         
         # Validate YouTube URL
         if not validate_youtube_url(url):
@@ -2251,8 +3233,22 @@ if mode == "YouTube Video":
             
             # Render results using UI function
             render_youtube_results(results)
+            metadata_summary = results.get("metadata", {})
+            summary_title = metadata_summary.get("title") or metadata_summary.get("transcript_title") or session_dir.name
+            summary_words = metadata_summary.get("word_count") or len(results.get("full_text", "").split())
+            record_sidebar_operation(
+                "Process Video",
+                "success",
+                message=f"{summary_title} ({summary_words:,} words)",
+                project_dir=session_dir.name
+            )
 
         except AudioDownloadError as e:
+            record_sidebar_operation(
+                "Process Video",
+                "failed",
+                message=f"{type(e).__name__}: {e}"
+            )
             st.error(f"❌ **Download Failed**")
             st.error(str(e))
             st.info("**Suggestions:**\n"
@@ -2262,6 +3258,11 @@ if mode == "YouTube Video":
             logger.error(f"Audio download error: {e}")
             
         except FileSizeError as e:
+            record_sidebar_operation(
+                "Process Video",
+                "failed",
+                message=f"{type(e).__name__}: {e}"
+            )
             st.error(f"❌ **File Too Large**")
             st.error(str(e))
             st.info("**Suggestions:**\n"
@@ -2271,6 +3272,11 @@ if mode == "YouTube Video":
             logger.error(f"File size error: {e}")
             
         except TranscriptionError as e:
+            record_sidebar_operation(
+                "Process Video",
+                "failed",
+                message=f"{type(e).__name__}: {e}"
+            )
             st.error(f"❌ **Transcription Failed**")
             st.error(str(e))
             st.info("**Suggestions:**\n"
@@ -2280,6 +3286,11 @@ if mode == "YouTube Video":
             logger.error(f"Transcription error: {e}")
             
         except APIQuotaError as e:
+            record_sidebar_operation(
+                "Process Video",
+                "failed",
+                message=f"{type(e).__name__}: {e}"
+            )
             st.error(f"❌ **API Quota Exceeded**")
             st.error(str(e))
             st.warning("**What to do:**\n"
@@ -2290,6 +3301,11 @@ if mode == "YouTube Video":
             logger.error(f"API quota error: {e}")
             
         except APIConnectionError as e:
+            record_sidebar_operation(
+                "Process Video",
+                "failed",
+                message=f"{type(e).__name__}: {e}"
+            )
             st.error(f"❌ **Connection Failed**")
             st.error(str(e))
             st.info("**Suggestions:**\n"
@@ -2300,6 +3316,11 @@ if mode == "YouTube Video":
             logger.error(f"API connection error: {e}")
             
         except Exception as e:
+            record_sidebar_operation(
+                "Process Video",
+                "failed",
+                message=f"{type(e).__name__}: {e}"
+            )
             st.error(f"❌ **Unexpected Error**")
             st.error(str(e))
             st.info("**Troubleshooting:**\n"
@@ -2353,6 +3374,25 @@ else:  # Document File mode
             logger.warning(f"File upload rejected: {file_size_mb:.1f}MB exceeds limit")
             st.stop()
         
+        # Validate file content and security
+        is_valid, validation_error = validate_uploaded_file(uploaded_file)
+        if not is_valid:
+            st.error(f"❌ **File Validation Failed**")
+            st.error(validation_error)
+            st.info("**Suggestions:**\n"
+                   "- Ensure the file is a valid PDF, DOCX, or TXT file\n"
+                   "- Check that the file is not corrupted\n"
+                   "- Verify the file extension matches the actual file type\n"
+                   "- Avoid special characters in the filename")
+            logger.warning(f"File upload rejected: {validation_error} - {sanitize_url_for_log(uploaded_file.name)}")
+            st.stop()
+        
+        record_sidebar_operation(
+            "Process Document",
+            "started",
+            message=f"{uploaded_file.name}",
+        )
+        
         # Rate limiting (shared with video processing)
         if 'last_process_time' not in st.session_state:
             st.session_state.last_process_time = 0
@@ -2397,8 +3437,18 @@ else:  # Document File mode
             
             # Render results using UI function
             render_document_results(results)
+            record_sidebar_operation(
+                "Process Document",
+                "success",
+                message=f"{uploaded_file.name}",
+            )
         
         except DocumentProcessingError as e:
+            record_sidebar_operation(
+                "Process Document",
+                "failed",
+                message=f"{type(e).__name__}: {e}"
+            )
             st.error(f"❌ **Document Processing Failed**")
             st.error(str(e))
             st.info("**Suggestions:**\n"
@@ -2409,6 +3459,11 @@ else:  # Document File mode
             logger.error(f"Document processing error: {e}")
             
         except APIQuotaError as e:
+            record_sidebar_operation(
+                "Process Document",
+                "failed",
+                message=f"{type(e).__name__}: {e}"
+            )
             st.error(f"❌ **API Quota Exceeded**")
             st.error(str(e))
             st.warning("**What to do:**\n"
@@ -2419,6 +3474,11 @@ else:  # Document File mode
             logger.error(f"API quota error: {e}")
             
         except APIConnectionError as e:
+            record_sidebar_operation(
+                "Process Document",
+                "failed",
+                message=f"{type(e).__name__}: {e}"
+            )
             st.error(f"❌ **Connection Failed**")
             st.error(str(e))
             st.info("**Suggestions:**\n"
@@ -2429,6 +3489,11 @@ else:  # Document File mode
             logger.error(f"API connection error: {e}")
             
         except Exception as e:
+            record_sidebar_operation(
+                "Process Document",
+                "failed",
+                message=f"{type(e).__name__}: {e}"
+            )
             st.error(f"❌ **Unexpected Error**")
             st.error(str(e))
             st.info("**Troubleshooting:**\n"

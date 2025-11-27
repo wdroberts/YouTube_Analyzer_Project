@@ -74,27 +74,31 @@ class TestSafeFilename:
 
 
 class TestValidateYoutubeUrl:
-    """Test YouTube URL validation."""
+    """Test YouTube URL validation with enhanced security checks."""
+    
+    # Valid 11-character YouTube video IDs for testing
+    VALID_VIDEO_ID = "dQw4w9WgXcQ"  # Standard format
+    VALID_SHORT_ID = "abc123xyz45"  # Alphanumeric
     
     def test_valid_youtube_urls(self):
-        """Test valid YouTube URLs return True."""
-        assert validate_youtube_url("https://www.youtube.com/watch?v=abc123") is True
-        assert validate_youtube_url("https://youtube.com/watch?v=xyz789") is True
-        assert validate_youtube_url("https://www.youtube.com/watch?v=abc&t=10s") is True
+        """Test valid YouTube URLs with proper video IDs return True."""
+        assert validate_youtube_url(f"https://www.youtube.com/watch?v={self.VALID_VIDEO_ID}") is True
+        assert validate_youtube_url(f"https://youtube.com/watch?v={self.VALID_SHORT_ID}") is True
+        assert validate_youtube_url(f"https://www.youtube.com/watch?v={self.VALID_VIDEO_ID}&t=10s") is True
     
     def test_valid_youtu_be_urls(self):
         """Test valid youtu.be short URLs return True."""
-        assert validate_youtube_url("https://youtu.be/abc123") is True
-        assert validate_youtube_url("https://youtu.be/xyz789?t=30") is True
+        assert validate_youtube_url(f"https://youtu.be/{self.VALID_VIDEO_ID}") is True
+        assert validate_youtube_url(f"https://youtu.be/{self.VALID_SHORT_ID}?t=30") is True
     
     def test_valid_youtube_shorts(self):
         """Test valid YouTube Shorts URLs return True."""
-        assert validate_youtube_url("https://www.youtube.com/shorts/abc123") is True
-        assert validate_youtube_url("https://youtube.com/shorts/xyz789") is True
+        assert validate_youtube_url(f"https://www.youtube.com/shorts/{self.VALID_VIDEO_ID}") is True
+        assert validate_youtube_url(f"https://youtube.com/shorts/{self.VALID_SHORT_ID}") is True
     
     def test_valid_mobile_urls(self):
         """Test valid mobile YouTube URLs return True."""
-        assert validate_youtube_url("https://m.youtube.com/watch?v=abc123") is True
+        assert validate_youtube_url(f"https://m.youtube.com/watch?v={self.VALID_VIDEO_ID}") is True
     
     def test_invalid_urls(self):
         """Test non-YouTube URLs return False."""
@@ -106,11 +110,48 @@ class TestValidateYoutubeUrl:
     def test_empty_string(self):
         """Test empty string returns False."""
         assert validate_youtube_url("") is False
+        assert validate_youtube_url(None) is False
     
     def test_malformed_urls(self):
         """Test malformed URLs return False."""
         assert validate_youtube_url("htp://broken") is False
         assert validate_youtube_url("youtube.com") is False  # Missing protocol
+    
+    def test_invalid_video_id_length(self):
+        """Test URLs with invalid video ID lengths are rejected."""
+        assert validate_youtube_url("https://youtube.com/watch?v=short") is False  # Too short
+        assert validate_youtube_url("https://youtube.com/watch?v=waytoolongvideoid") is False  # Too long
+        assert validate_youtube_url("https://youtube.com/watch?v=abc123") is False  # 6 chars, need 11
+    
+    def test_missing_video_id(self):
+        """Test URLs without video IDs are rejected."""
+        assert validate_youtube_url("https://youtube.com/watch") is False
+        assert validate_youtube_url("https://youtube.com/") is False
+        assert validate_youtube_url("https://youtu.be/") is False
+    
+    def test_suspicious_schemes(self):
+        """Test suspicious URL schemes are rejected."""
+        assert validate_youtube_url("javascript:alert('xss')") is False
+        assert validate_youtube_url("data:text/html,<script>alert('xss')</script>") is False
+        assert validate_youtube_url("vbscript:msgbox('xss')") is False
+        assert validate_youtube_url("file:///etc/passwd") is False
+    
+    def test_invalid_protocols(self):
+        """Test non-HTTP(S) protocols are rejected."""
+        assert validate_youtube_url("ftp://youtube.com/watch?v=abc123xyz45") is False
+        assert validate_youtube_url("mailto:test@example.com") is False
+    
+    def test_suspicious_parameters(self):
+        """Test URLs with suspicious query parameters are rejected."""
+        assert validate_youtube_url(f"https://youtube.com/watch?v={self.VALID_VIDEO_ID}&javascript=alert(1)") is False
+        assert validate_youtube_url(f"https://youtube.com/watch?v={self.VALID_VIDEO_ID}&onclick=evil()") is False
+        assert validate_youtube_url(f"https://youtube.com/watch?v={self.VALID_VIDEO_ID}&eval=code") is False
+    
+    def test_valid_with_safe_parameters(self):
+        """Test URLs with safe parameters are still accepted."""
+        assert validate_youtube_url(f"https://youtube.com/watch?v={self.VALID_VIDEO_ID}&t=10s") is True
+        assert validate_youtube_url(f"https://youtube.com/watch?v={self.VALID_VIDEO_ID}&feature=share") is True
+        assert validate_youtube_url(f"https://youtube.com/watch?v={self.VALID_VIDEO_ID}&list=PLxxx") is True
 
 
 class TestExtractVideoId:
