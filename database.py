@@ -264,12 +264,23 @@ class DatabaseManager:
             project_id: Project ID
             **kwargs: Fields to update (title, notes, etc.)
         """
-        allowed_fields = {
-            'title', 'content_title', 'source', 'word_count',
-            'segment_count', 'notes'
+        # Explicit field mapping for security (prevents SQL injection via field names)
+        ALLOWED_UPDATE_FIELDS = {
+            'title': 'title',
+            'content_title': 'content_title',
+            'source': 'source',
+            'word_count': 'word_count',
+            'segment_count': 'segment_count',
+            'notes': 'notes'
         }
         
-        updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
+        # Validate and filter updates
+        updates = {}
+        for k, v in kwargs.items():
+            if k in ALLOWED_UPDATE_FIELDS:
+                updates[k] = v
+            else:
+                logger.warning(f"Attempted to update invalid field: {k}")
         
         if not updates:
             return
@@ -277,7 +288,8 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+            # Use explicit field mapping instead of f-strings for field names
+            set_clause = ", ".join([f"{ALLOWED_UPDATE_FIELDS[k]} = ?" for k in updates.keys()])
             values = list(updates.values()) + [project_id]
             
             cursor.execute(f"""

@@ -3,6 +3,7 @@ YouTube Analyzer - Main Application
 Transcribe and analyze YouTube videos and documents using OpenAI's Whisper and GPT.
 """
 # Standard library imports
+import html
 import io
 import json
 import logging
@@ -2771,7 +2772,12 @@ with st.sidebar:
             project_info = entry.get("project_dir") or ""
             message = entry.get("message", "")
             metadata = f"({project_info})" if project_info else ""
-            st.markdown(f"**{time_label}** · {op_name} · {status} {metadata}<br>{message}", unsafe_allow_html=True)
+            # Use safe rendering - escape user content to prevent XSS
+            safe_message = html.escape(message) if message else ""
+            safe_metadata = html.escape(metadata) if metadata else ""
+            st.markdown(f"**{time_label}** · {op_name} · {status} {safe_metadata}")
+            if safe_message:
+                st.caption(safe_message)
 
     alerts = evaluate_health_alerts(
         config.data_root,

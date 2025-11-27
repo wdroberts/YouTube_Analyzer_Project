@@ -37,6 +37,7 @@
 - **D: Drive Storage** - All data stored on configurable location (default: D: drive)
 
 ### 💬 AI-Powered Q&A
+- **Per-Project Chat** - Ask questions directly within each project view
 - **Interactive Content Q&A** - Ask questions about any analyzed video or document
 - **Context-Aware Answers** - AI responds based on actual transcript content
 - **Multi-Question Sessions** - Ask multiple questions in one conversation
@@ -44,7 +45,8 @@
 - **Cost Transparency** - See token usage and API cost for each answer (~$0.0005-$0.003 per question)
 - **Session Summaries** - Track total tokens and costs per Q&A session
 - **Smart Truncation** - Handles long transcripts intelligently (up to 15,000 characters)
-- **Rate Limiting** - Built-in 1-second intervals between API calls
+- **Rate Limiting** - Built-in 2-second minimum intervals between questions
+- **Input Sanitization** - All chat inputs are sanitized for security (HTML/script removal, XSS prevention)
 
 ### 🎯 Advanced Features
 - **Database Explorer** - Comprehensive UI for browsing and managing projects
@@ -334,7 +336,12 @@ project_content_fts (FTS5 virtual table for full-text search)
 
 ## 🧪 Testing
 
-The project includes comprehensive automated testing with **65 test cases** and **87.7% pass rate**.
+The project includes comprehensive automated testing with **162 test cases** covering:
+- Security validation (URL, file upload, chat input, path validation)
+- Utility functions and configuration
+- File operations and database integration
+- Streamlit UI integration
+- Error handling and edge cases
 
 ### Run Tests
 
@@ -352,9 +359,12 @@ open htmlcov/index.html   # Mac
 
 ### Test Coverage
 
-- **Utility Functions**: 86.5% (32 tests)
-- **Configuration**: 82.4% (17 tests)
-- **File Operations**: 100% (11 tests)
+- **Security Tests**: 69 tests (URL validation, file validation, chat sanitization, path validation)
+- **Utility Functions**: 40+ tests
+- **Configuration**: 17 tests
+- **File Operations**: 14 tests
+- **Streamlit Integration**: 14 tests
+- **Database & Telemetry**: 8+ tests
 
 See [tests/README.md](tests/README.md) for detailed testing documentation.
 
@@ -370,10 +380,18 @@ YouTube_Analyzer_Project/
 ├── start_app.bat                  # Windows launcher
 ├── pytest.ini                     # Test configuration
 │
-├── tests/                         # Test suite
+├── tests/                         # Test suite (162 tests)
 │   ├── test_utilities.py         # Utility function tests
 │   ├── test_config.py            # Configuration tests
-│   └── test_file_operations.py   # File I/O tests
+│   ├── test_file_operations.py   # File I/O tests
+│   ├── test_chat_validation.py   # Chat input sanitization tests
+│   ├── test_file_validation.py   # File upload validation tests
+│   ├── test_path_validation.py   # Path security tests
+│   ├── test_streamlit_integration.py  # UI integration tests
+│   └── test_telemetry.py        # Health monitoring tests
+│
+├── sidebar_ops.py                # Sidebar operation logging
+├── telemetry.py                  # Health alerts and monitoring
 │
 ├── outputs/                       # Processed content (gitignored)
 │   └── [session-id]/             # Individual processing sessions
@@ -398,6 +416,37 @@ YouTube_Analyzer_Project/
 
 ## 🔒 Security & Privacy
 
+### Security Features
+
+The application includes comprehensive security hardening across four phases:
+
+#### Phase 1: URL Validation
+- ✅ Strict YouTube URL pattern validation
+- ✅ Rejection of suspicious schemes (javascript:, data:, file:, etc.)
+- ✅ Video ID format validation (11 alphanumeric characters)
+- ✅ Suspicious parameter detection and blocking
+
+#### Phase 2: File Upload Validation
+- ✅ Filename sanitization and path traversal prevention
+- ✅ Content-type verification via magic bytes
+- ✅ File signature validation (PDF, DOCX, TXT)
+- ✅ Binary file detection and rejection
+- ✅ Embedded script detection in PDFs
+
+#### Phase 3: Chat Input Sanitization
+- ✅ HTML/XML tag stripping
+- ✅ Script pattern removal (javascript:, onclick=, eval(), etc.)
+- ✅ Control character filtering
+- ✅ Unicode normalization (prevents homograph attacks)
+- ✅ Rate limiting (2-second minimum between questions)
+
+#### Phase 4: Path Validation
+- ✅ Directory traversal prevention (blocks `..`, `/`, `\`)
+- ✅ Symlink attack protection via path resolution
+- ✅ Null byte injection prevention
+- ✅ Absolute path rejection
+- ✅ Parent directory verification
+
 ### Data Handling
 - ✅ All processing happens locally on your machine
 - ✅ Files are only sent to OpenAI APIs (Whisper, GPT)
@@ -415,6 +464,7 @@ YouTube_Analyzer_Project/
 - Regenerate API keys if accidentally exposed
 - Monitor your OpenAI usage and billing
 - Keep dependencies up to date
+- All user inputs are validated and sanitized before processing
 
 ---
 
