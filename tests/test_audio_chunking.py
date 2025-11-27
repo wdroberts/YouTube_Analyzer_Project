@@ -46,7 +46,7 @@ class TestAudioChunking:
         assert len(result) == 1
         assert result[0] == mock_audio_path
     
-    @patch('app.AudioSegment')
+    @patch.object(app, 'AudioSegment')
     def test_large_file_split(self, mock_audio_segment, large_audio_path):
         """Test that large files are split into chunks."""
         # Mock AudioSegment to simulate audio file
@@ -55,9 +55,14 @@ class TestAudioChunking:
         mock_audio_segment.from_mp3.return_value = mock_audio
         
         # Mock audio slicing
-        def mock_slice(start, end):
+        def mock_slice(slice_obj):
+            start = slice_obj.start
+            end = slice_obj.stop
             chunk = MagicMock()
-            chunk.export = MagicMock()
+            def fake_export(path, format=None, bitrate=None):
+                path.write_bytes(b"chunk")
+                return path
+            chunk.export.side_effect = fake_export
             return chunk
         
         mock_audio.__getitem__.side_effect = mock_slice
@@ -84,7 +89,7 @@ class TestAudioChunking:
         # Check that max file size doesn't exceed Whisper limit
         assert config.max_audio_file_size_mb <= 25
     
-    @patch('app.AudioSegment')
+    @patch.object(app, 'AudioSegment')
     def test_chunk_overlap(self, mock_audio_segment, large_audio_path):
         """Test that chunks have proper overlap."""
         # Mock AudioSegment
@@ -94,10 +99,15 @@ class TestAudioChunking:
         
         slice_calls = []
         
-        def mock_slice(start, end):
+        def mock_slice(slice_obj):
+            start = slice_obj.start
+            end = slice_obj.stop
             slice_calls.append((start, end))
             chunk = MagicMock()
-            chunk.export = MagicMock()
+            def fake_export(path, format=None, bitrate=None):
+                path.write_bytes(b"chunk")
+                return path
+            chunk.export.side_effect = fake_export
             return chunk
         
         mock_audio.__getitem__.side_effect = mock_slice
@@ -128,8 +138,8 @@ class TestAudioChunking:
 class TestAudioChunkingIntegration:
     """Integration tests for audio chunking with transcription."""
     
-    @patch('app.client')
-    @patch('app.AudioSegment')
+    @patch.object(app, 'client')
+    @patch.object(app, 'AudioSegment')
     def test_transcribe_with_chunks(self, mock_audio_segment, mock_client, tmp_path):
         """Test transcription with chunked audio."""
         from app import transcribe_audio_with_timestamps
